@@ -1,0 +1,73 @@
+\documentclass[a4paper,12pt]{article}
+\usepackage[a4paper,left=3cm,right=3cm,top=3cm,bottom=3cm]{geometry}
+\usepackage{setspace}
+%\renewcommand{\baselinestretch}{1.5} % or 2?
+
+\usepackage[utf8]{inputenc}
+
+\usepackage[USenglish]{babel}
+\usepackage[babel]{csquotes}
+
+\usepackage{amsmath, amssymb}
+
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+\usepackage[all]{hypcap}
+
+\usepackage{graphicx, subcaption}
+\usepackage{tabularx}
+
+\usepackage[style=authoryear, date=year, maxbibnames=100, backend=biber, natbib]{biblatex}
+\bibliography{~/Zotero/Bibliothek.bib}
+%% APPROXIMATING ASA STYLE (Amercan Sociological Association)
+% remove comma after last author and add colon before cited pages within text
+\DeclareDelimFormat{nameyeardelim}{\space}
+\renewcommand*{\postnotedelim}{\addcolon \addspace}
+\DeclareFieldFormat{postnote}{\mknormrange{#1}}
+% remove parentheses around year and add dots in bibliography
+\usepackage{xpatch}
+\xpatchbibmacro{date+extradate}{%
+  \printtext[parens]%
+}{%
+  \setunit{\addperiod\space}%
+  \printtext%
+}{}{}
+% implement volume and number in reference list as: volume(number)
+\renewbibmacro{in:}{}
+\renewbibmacro*{volume+number+eid}{%
+  \printfield{volume}%
+  \printfield{number}%
+  \setunit{\addcomma\space}%
+  \printfield{eid}}
+\DeclareFieldFormat[article]{number}{\mkbibparens{#1}}
+% place pages after colon without pp. in bibliography
+\renewcommand*{\bibpagespunct}{\addcolon\space}
+\DeclareFieldFormat{pages}{#1}
+
+
+\title{Testing the formal Model using ACS and PUMS Data}
+
+\author{Malte Grönemann \\ University of Mannheim, Germany \\ \texttt{malte.groenemann@uni-mannheim.de}}
+
+\begin{document}
+
+\maketitle
+
+\textcolor{red}{WORKING PAPER: Do not distribute or cite without permission}
+
+You find the code and supplementary material on \href{https://github.com/maltegroenemann/soc-econ-housing}{GitHub}.
+
+\begin{abstract} 
+Test of new hypotheses
+\end{abstract}
+
+Keywords: residential segregation, residential mobility, gentrification, inequality, housing, neighborhoods, agent-based modeling
+
+JEL codes: R23, R31, C63, Z13
+
+
+\include{SEHTestACS1_datamethods}
+
+\singlespacing
+\printbibliography
+
+\end{document}

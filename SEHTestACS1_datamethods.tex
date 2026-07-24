@@ -1,0 +1,37 @@
+\section{Data and Methods}
+
+\subsection{Data}
+
+To test whether these hypotheses hold in the contemporary US, I combine census tract aggregates and individual data. I limit my analysis to the 100 largest core-based statistical areas (henceforth: metro areas) in the contiguous US ranked by 2024 population. Tract-level data come from four non-overlapping 5-year American Community Survey (ACS) estimates (2005–2009, 2010–2014, 2015–2019, and 2020–2024; I will refer to the periods by their last year)\footnote{NHGIS codes: 2005\_2009\_ACS5a, 2010\_2014\_ACS5a, 2015\_2019\_ACS5a, 2020\_2024\_ACS5a}, accessed through IPUMS NHGIS \citep{schroederNationalHistoricalGeographic2025}. From these tract aggregates, I calculate segregation indices and other city-level aggregates for the 100 metro areas and every ACS wave\footnote{A few of the metro-level aggregates are instead based on the PUMS data, depending on availability.}. Household-level data are drawn from the corresponding ACS Public Use Microdata Sample (PUMS) files, accessed through IPUMS USA \citep{rugglesIPUMSUSAVersion2025}, and limited to households residing within the same set of metro areas. I therefore use data with a three-level hierarchical data structure where each of the four 5-year ACS windows contains the 100 most populous metro areas where each metro area contains a sample of between 2,845,081 and 3,839,758 households in a given 5-year period (households are nested in metro areas which are nested in ACS periods). However, ACS is a repeated cross-section, not a panel. Each 5-year window within a metro area is therefore a cross-sectional sample pooled over 5 years. The total number of observations amounts to 14,047,268 households.
+
+\subsection{Measures}
+
+There is a large literature about potential biases in measures of residential segregation by income using ACS and ways to resolve them (e.g. \cite{loganIncomeSegregationWhom2020, leung-gagneItSurprisinglyDifficult2023}). Segregation indices based on public tract-level data are biased from sampling variation, weighting, measurement error, and temporal pooling. However, corrected and uncorrected measures correlate highly and bias is only a real concern for comparisons over time and between subgroups \citep[1972f]{loganIncomeSegregationWhom2020}. So while these methodological issues have substantive consequences in descriptive work, bias is less consequential for regression estimates as at least for general levels of segregation in large metro areas, the bias appears to be similar and will be absorbed by the intercepts. I therefore use uncorrected measures of segregation for simplicity, specifically the rank-order information theory index $H^R$ as defined by \citet{reardonNewApproachMeasuring2006} for ordered variables and the Theil index $H$ for binary variables \citep{reardonMeasuresMultigroupSegregation2002}.
+
+\subsection{Methods}
+
+Because my theoretical model considers the housing market and residential segregation of a city in particular as an important macro-level factor to individual outcomes, my statistical model needs to reflect that households are nested in metro areas.  (though sample sizes in the models can vary due to missing values). 
+
+\begin{equation}
+\hat{y}_{imt} = \alpha + \gamma_t + \delta_m + \beta X_{ict}
+\end{equation}
+
+In these regressions, household $i$ resides in metro area $m$ in period $t$. To represent this data structure in my statistical models, I use linear models with  time (ACS 5-year period) $\gamma_t$ and metro area $\delta_c$ fixed effects. These fixed effects absorb mean differences between cities and capture general time trends. The identifying variation on the micro-level in the regressions therefore come from differences between households within cities and years. The macro-level variables are identified by changes of these variables within metro areas over time net of country-wide trends.
+
+Beyond the fixed effects, I include several controls to address remaining confounders. At the individual level:
+
+\begin{itemize}
+  \item \textbf{Race/ethnicity}: Racial discrimination in housing markets means that Black and Hispanic households obtain lower-quality housing at a given income level, affecting the intercept (and potentially the slope) of the income--quality relationship independently of city-level segregation.
+  \item \textbf{Education}: Education proxies permanent income better than current income and affects credit access and landlord screening. Omitting it risks attenuating the income coefficient and confounding the income--quality slope.
+  \item \textbf{Age}: Life-cycle effects mean that long-term homeowners have housing quality locked in at past income levels, weakening the contemporaneous income--quality link among owners.
+  \item \textbf{Household type}: Single-person, couple, and family-with-children households face different unit-size demands and in some cases housing market discrimination, affecting quality access at a given income.
+\end{itemize}
+
+At the metro-area level, the fixed effects absorb all time-invariant city characteristics, but time-varying city-level factors may still confound the income segregation interaction:
+
+\begin{itemize}
+  \item \textbf{Income inequality}: Trends in income inequality are not necessarily parallel across cities. Rising inequality independently widens the income distribution and can mechanically steepen the income--quality gradient even without a change in residential sorting.
+  \item \textbf{Racial segregation}: Racial and income segregation are positively correlated across and within cities over time. If racial segregation independently steepens the income--quality gradient --- because racially sorted neighbourhoods are also quality-sorted and race is correlated with income --- then the income segregation index $H^R$ would partially proxy racial segregation. A city-level racial segregation index controls for this, isolating the effect of income segregation per se.
+  \item \textbf{Housing market tightness}: Cities with tighter rental markets (low vacancy rates) offer households less quality per dollar of income, compressing the income--quality gradient for renters independently of segregation.
+  \item \textbf{Local labour market conditions}: City-level unemployment or wage growth affects income and housing demand asymmetrically by income group. Failing to control for local economic conditions may bias the within-city changes in the income segregation interaction.
+\end{itemize}

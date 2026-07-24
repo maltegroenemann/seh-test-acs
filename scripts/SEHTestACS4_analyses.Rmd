@@ -1,0 +1,378 @@
+---
+title: "A Socio-Economic Model of Residential Segregation, Neighborhood Change and Housing Inequality"
+subtitle: "Empirical Analysis: Individual-Level Hypotheses (ACS PUMS)"
+author: "Malte Grönemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error   = FALSE,
+                      out.width = "100%")
+
+library(nanoparquet)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(fixest)
+library(modelsummary)
+library(latex2exp)
+library(kableExtra)
+
+cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
+shapes <- c(0, 1, 2, 5, 6)
+
+# TODO for replication: change path
+#data_dir <- "~/Projects/SEHTestACS/data/"
+data_dir <- "./data/"
+
+pums <- read_parquet(paste0(data_dir, "pums_analysis.parquet")) |>
+  mutate(YEAR = as.integer(YEAR),
+         # race_eth: nhwhite as reference category
+         race_eth = factor(race_eth, levels = c("nhwhite", "nhblack", "hispanic", "nhother"))
+         )
+
+#acs <- read_parquet(paste0(data_dir, "acs_top100.parquet"))
+
+cbsa <- read_parquet(paste0(data_dir, "cbsa_vars.parquet"))
+```
+
+
+# Data and Operationalisation
+
+## Housing Quality
+
+The ACS PUMS does not collect housing quality directly. We use market-based proxies that capture both unit characteristics and neighbourhood desirability although the original hypotheses on housing quality were based on characteristics of the unit alone. Please see the analysis for utility and rent for those. In my model the relationship of income and rent is not moderated by segregation because rent is a perfect reflection of desirability in my model and the richest households will sort into the best units no matter why they are desirable or how segregated the city is. But WHY OK HERE?
+
+- **Renters:** gross monthly rent in 1999 USD (`rentgrs_real`)
+- **Owners:** self-reported home value in 1999 USD (`valueh_real`)
+
+To remove between-metro and between-year price level differences, both measures are z-standardised within YEAR × CBSA × tenure group. The resulting `quality` variable is a within-context quality rank (mean 0, SD 1 in each group).
+
+These measures are definitely imperfect measures of housing quality. Self-reported home values are likely biased by their owners' perception (LIT ON SUBJECTIVE PRICES?) and the rent a household pays might not be a perfect representation of market value when they have an older contract and/or the unit is under rent control. I nonetheless think that on average, higher values on these measures coincides with a higher quality/desirability of the unit. The measurement error likely attenuates the estimates though.
+
+Household income is equivalised using the square root household size scale (`hhincome_real / sqrt(NUMPREC)`) and log-transformed to account for the well-documented diminishing returns in the income–housing relationship. Households with zero or negative income are bottom-coded at 1 (1999 USD), giving a floor of log(1) = 0. Income is top-coded at the within-CBSA × year p99 to reduce the influence of extreme values.
+
+**Robustness check on rent control:** In cities with rent control (notably New York, San Francisco, and Los Angeles), long-term tenants may pay substantially below market rent, detaching rent from current housing quality. A robustness version of the quality variable (`quality_rc`) standardises renter quality using only households who moved into their unit within the past two years (`MOVEDIN >= YEAR - 2`), where rents more closely reflect current market conditions.
+
+## Sample Coverage
+
+```{r coverage}
+coverage <- pums |>
+  mutate(tenure = if_else(renter == 1L, "Renters", "Owners")) |>
+  count(CBSA_name, YEAR, tenure) |>
+  arrange(CBSA_name, YEAR, tenure)
+
+summary(coverage$n)
+```
+
+The minimum group size across all CBSA × year × tenure cells is `r min(coverage$n)` households, sufficient for reliable within-group standardisation.
+
+
+# Rent/Housing Segregation > Income Segregation
+
+> Rent and Housing Quality are more unequally distributed in space within cities than household income.
+
+problems: no uniform size of the housing unit, hh income means different things for hh of different size/composition, only gross rent and hh income in ACS. However, unit size is endogenous to the developers' decision as well. And to pay absolute rets, hh income matters not equiv income.
+
+Spatial unevenness is measured by the rank-order information theory index H^R (Reardon & Bischoff 2011) for the continuous variables income, gross rent, and home value, and by the binary Theil H for the categorical variable tenure. Both indices are bounded [0,1] and scale-independent: H^R is robust to bracket boundary shifts and the absolute level of the variable, so cross-city and over-time comparisons are valid without deflating to constant dollars. The two indices are conceptually consistent — H^R for a binary variable reduces exactly to binary H — but not identical: H^R summarises segregation across the full distributional gradient by integrating binary H values across all possible cutpoints, whereas H for tenure captures a single renter/owner split. Comparisons between H^R and H are therefore meaningful as measures of overall spatial unevenness but should not be interpreted as the same underlying quantity. A further difference in universe should be noted: H_inc is computed over all households, whereas H_rent covers only cash-rent-paying renters (B25063) and H_val only owner-occupiers (B25075). In principle this could inflate the housing indices if renters or owners are already more spatially concentrated as subpopulations. In practice, however, H^R is distribution-invariant — it captures how unevenly the *within-universe* distribution of rents or values is spread across tracts, not how the universe itself is placed — so the comparison remains meaningful as a test of whether each housing dimension is more spatially unequal than income within its respective population.
+
+## Description of Segregation Indices
+
+Over all metros and periods, home value is most unevenly distributed of the continuous variables ($H^R$ = `r round(mean(cbsa$H_val, na.rm = T), 3)`), followed by rent ($H^R$ = `r round(mean(cbsa$H_rent, na.rm = T), 3)`) and income ($H^R$ = `r round(mean(cbsa$H_inc, na.rm = T), 3)`; $H(0.5)$ = `r round(mean(cbsa$H_inc_p50, na.rm = T), 3)`). Home value and rents are really substantially uneven among tracts. Tenure type is also substantively unequal between census tracts with $H$ = `r round(mean(cbsa$H_tenure, na.rm = T), 3)`. Racial/ethnic segregation is very prevalent in the US and amounts to $H$ = `r round(mean(cbsa$H_bw, na.rm = T), 3)` when measured between Whites and Blacks only and to $H$ = `r round(mean(cbsa$H_race_multi, na.rm = T), 3)` for the multi-group Theil index on average. Vacancies are less unevenly placed with  $H$ = `r round(mean(cbsa$H_vac, na.rm = T), 3)`.
+
+```{r}
+cbsa |>
+  select(H_inc, H_rent, H_val, H_tenure, H_bw, H_race_multi) |>
+  cor(use = "complete.obs") |>
+  ggcorrplot(type = "upper",
+             show.legend = F, lab = T) +
+  labs(title = "Correlation Matrix")
+```
+Cities with high income segregation tend to be segregated on the other dimensions as well, but the association is strongest with home values (0.77). Where income sorts households across tracts, property values track that sorting closely; tenure (0.53) and rents (0.47) follow at some distance.
+
+The clearest asymmetry concerns rents. Home value segregation correlates 0.38–0.39 with the two racial measures, while rent segregation correlates 0.07 with both. Racially segregated cities are differentiated by what their housing is worth but not by what it rents for. Rent segregation is the weakest correlate throughout the matrix — 0.27 with tenure, 0.47 with income, both the lowest in their columns — so it may simply be a measure with little across-tract variation to distribute. Tenure segregation relates more closely to the economic dimensions (0.53 with income, 0.40 with value) than to the racial ones (0.25–0.31). At the metro level, tenure is primarily an economic axis.
+
+The two racial measures correlate 0.90, which is partly definitional, since multigroup segregation contains the Black–White contrast as a component. More informative is that both relate almost identically to everything else — 0.42/0.47 with income, 0.38/0.39 with value, 0.31/0.25 with tenure, 0.07/0.07 with rent. Extending the measure to Hispanics and other groups changes nothing about how racial segregation maps onto the housing dimensions.
+
+
+## Test of the Hypothesis
+
+
+```{r}
+cbsa |>
+  select(CBSAFP, CBSA_name, year, H_inc, H_inc_p50, H_rent, H_val, H_tenure) |>
+  mutate(CBSA_name = forcats::fct_reorder(CBSA_name, H_inc, .fun = mean, na.rm = TRUE)) |>
+  pivot_longer(starts_with("H_"),
+               names_to = "H_dimension",
+               values_to = "H_index") |>
+  mutate(H_dimension = case_when(H_dimension == "H_inc"     ~ "Household Income (H^R)",
+                                 H_dimension == "H_inc_p50" ~ "Household Income H(0.5)",
+                                 H_dimension == "H_rent"    ~ "Gross Rent",
+                                 H_dimension == "H_val"     ~ "Home Value",
+                                 H_dimension == "H_tenure"  ~ "Tenure Type")) |>
+  ggplot() +
+  aes(y = H_index,
+      x = CBSA_name,
+      colour = H_dimension,
+      shape = H_dimension,
+      group = H_dimension) +
+  geom_point() +
+  geom_line() +
+  facet_grid(rows = vars(year)) +
+  labs(x = "Metro Area", y = NULL, colour = NULL, shape = NULL) +
+  scale_color_manual(values = cb_palette,
+                     labels = c("Household Income (H^R)"   = TeX("Household Income $H^R$"),
+                                "Household Income H(0.5)"  = TeX("Household Income $H(0.5)$"),
+                                "Gross Rent"               = TeX("Gross Rent $H^R$"),
+                                "Home Value"               = TeX("Home Value $H^R$"),
+                                "Tenure Type"              = TeX("Tenure Type $H$"))) +
+  scale_fill_manual(values = cb_palette) +
+  scale_shape_manual(values = shapes,
+                     labels = c("Household Income (H^R)"   = TeX("Household Income $H^R$"),
+                                "Household Income H(0.5)"  = TeX("Household Income $H(0.5)$"),
+                                "Gross Rent"               = TeX("Gross Rent $H^R$"),
+                                "Home Value"               = TeX("Home Value $H^R$"),
+                                "Tenure Type"              = TeX("Tenure Type $H$"))) +
+  scale_linetype_manual(values = lines) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Rent is more unevenly distributed than income in `r 100 * sum(cbsa$H_rent > cbsa$H_inc, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of all valid observations of the 100 cities and 4 periods. The estimated home value is spatially more uneven in `r 100 * sum(cbsa$H_val > cbsa$H_inc, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of observations. Housing tenure (renter vs. owner-occupier) is more unevenly placed than household income ($H^R$) in `r 100 * sum(cbsa$H_tenure > cbsa$H_inc, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of all valid cases. The like-for-like comparison using $H(0.5)$ — binary H at the median income cutpoint, directly comparable to the single-split tenure H — yields the same conclusion: tenure exceeds income segregation in `r 100 * sum(cbsa$H_tenure > cbsa$H_inc_p50, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of observations.
+
+To test whether these differences are statistically significant, I regress each pairwise difference (e.g. H_rent − H_inc) on an intercept with standard errors two-way clustered by CBSA and year. Two-way clustering accounts for within-metro correlation across waves and within-year correlation across metros. Because the outcome is already a difference between two indices, year fixed effects would only matter if national trends in the two indices diverge, which is absorbed by the clustering. The null hypothesis is that the mean difference is zero, and a significant intercept means we can reject that null. The test does not account for ACS sampling uncertainty within tracts — the H indices are treated as fixed — so it captures variation across metros and time, not measurement error in the indices themselves.
+
+```{r seg_diff_tests}
+modelsummary(
+  list("Gross Rent − Income"        = feols(I(H_rent    - H_inc)    ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Home Value − Income"        = feols(I(H_val     - H_inc)    ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Tenure − Income (H^R)"      = feols(I(H_tenure  - H_inc)    ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Tenure − Income H(0.5)"       = feols(I(H_tenure - H_inc_p50) ~ 1, cluster = ~CBSAFP + year, data = cbsa)),
+  estimate    = "{estimate}{stars}",
+  statistic   = c("({std.error})", "p {p.value}"),
+  coef_rename = c("(Intercept)" = "Difference"),
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs"),
+  output      = "html"
+)
+```
+
+## Robustness Check: Segregation within Race
+
+In the US, the housing market is not only characterized by income segregation but also racial segregation. And the former (in combination with group differences in income) seems to be less a cause for the latter as often assumed. Instead, historical patterns of racially segregated neighborhoods reproduce itself (Krysan and Crowder 2017), effectively creating a segmented housing market. To see whether these relationships hold within race groups, I compare income and tenure segregation by three race groups: non-hispanic White, non-hispanic Black, and Hispanic/Latino. Home values and rents are not available as brackets separated by race (at least not in the publicly accessible ACS data) so that I cannot compare income segregation to rent/value segregation within race groups.
+
+
+```{r}
+cbsa |>
+  select(H_inc, H_tenure, H_bw, H_race_multi, H_inc_nhw, H_tenure_nhw, H_inc_nhb, H_tenure_nhb, H_inc_his, H_tenure_his) |>
+  cor(use = "complete.obs") |>
+  ggcorrplot(type = "upper",
+             show.legend = F, lab = T) +
+  labs(title = "Correlation Matrix")
+```
+Tenure and income segregation move together far more tightly within racial groups than in the population as a whole: 0.53 overall, but 0.60 among Whites and 0.94–0.95 among Hispanics and Blacks. Within groups, sorting by tenure and sorting by income describe nearly the same partition.
+
+Cities with high racial segregation are also cities in which the White population is internally stratified. Within-White tenure segregation correlates 0.80 with Black–White segregation and 0.41 with total tenure segregation, and within-White income segregation correlates 0.65 with total income segregation. For Blacks the associations run the other way. Within-Black income segregation correlates −0.29 with total income segregation and −0.52 with multigroup racial segregation; the tenure figures are −0.26 and −0.50. Cities that are highly segregated overall have comparatively economically mixed Black neighborhoods. These two patterns together are consistent with a white flight hypothesis: racial sorting and within-White tenure stratification produced jointly as White households distributed across a suburban ring differentiated by tenure and income, while Black households remained constrained across the income distribution, leaving middle-class and poor Black households in the same tracts.
+
+Within-Hispanic segregation stands apart. Its two components correlate 0.94 with each other but only 0.07–0.31 with everything else, with signs that flip across the matrix — mildly positive with racial segregation, mildly negative with the within-White and within-Black measures. Cities that are segregated on the other dimensions are not systematically segregated within their Hispanic population.
+
+
+```{r seg_race_plot}
+cbsa |>
+  select(CBSAFP, CBSA_name, year, H_inc,
+         H_inc_nhw, H_inc_nhw_p50, H_inc_nhb, H_inc_nhb_p50, H_inc_his, H_inc_his_p50,
+         H_tenure_nhw, H_tenure_nhb, H_tenure_his) |>
+  mutate(CBSA_name = forcats::fct_reorder(CBSA_name, H_inc, .fun = mean, na.rm = TRUE)) |>
+  select(-H_inc) |>
+  pivot_longer(starts_with("H_"),
+               names_to = "H_dimension",
+               values_to = "H_index") |>
+  mutate(
+    race_group = case_when(grepl("nhw", H_dimension) ~ "NH-White",
+                           grepl("nhb", H_dimension) ~ "NH-Black",
+                           grepl("his", H_dimension) ~ "Hispanic"),
+    H_type     = case_when(grepl("p50",    H_dimension) ~ "Income H(0.5)",
+                           grepl("inc",    H_dimension) ~ "Income H^R",
+                           grepl("tenure", H_dimension) ~ "Tenure")
+  ) |> 
+  ggplot() +
+  aes(y = H_index,
+      x = CBSA_name,
+      colour = H_type,
+      shape = H_type,
+      group = H_type) +
+  geom_point() +
+  geom_line() +
+  facet_grid(rows = vars(year), cols = vars(race_group)) +
+  labs(x = "Metro Area", y = NULL, colour = NULL, shape = NULL) +
+  scale_color_manual(values = cb_palette,
+                     labels = c("Income H^R"    = TeX("Income $H^R$"),
+                                "Income H(0.5)" = TeX("Income $H(0.5)$"),
+                                "Tenure"        = TeX("Tenure $H$"))) +
+  scale_fill_manual(values = cb_palette) +
+  scale_shape_manual(values = shapes,
+                     labels = c("Income H^R"    = TeX("Income $H^R$"),
+                                "Income H(0.5)" = TeX("Income $H(0.5)$"),
+                                "Tenure"        = TeX("Tenure $H$"))) +
+  scale_linetype_manual(values = lines) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+The ordering of the figure is the same as above, based on overall income segregation. It shows that in general, tenure segregation exceeds income segregation within the three race groups. It also shows that both income and tenure segregation is much higher higher on average and much more varied between metro areas for Blacks and Hispanics compared to Whites. Averaged over all four ACS periods and all 100 metros, Hispanics have the highest within-group income segregation ($H^R_H$ = `r round(mean(cbsa$H_inc_his, na.rm = T), 3)`; $H(0.5)_H$ = `r round(mean(cbsa$H_inc_his_p50, na.rm = T), 3)`) with Blacks following closely ($H^R_B$ = `r round(mean(cbsa$H_inc_nhb, na.rm = T), 3)`; $H(0.5)_B$ = `r round(mean(cbsa$H_inc_nhb_p50, na.rm = T), 3)`). Whites in contrast only have a within-group income segregation index of $H^R_W$ = `r round(mean(cbsa$H_inc_nhw, na.rm = T), 3)` ($H(0.5)_W$ = `r round(mean(cbsa$H_inc_nhw_p50, na.rm = T), 3)`). Unevenness in tenure over census tracts is highest within Blacks ($H_B$ = `r round(mean(cbsa$H_tenure_nhb, na.rm = T), 3)`) but the difference to Hispanics is again small ($H_H$ = `r round(mean(cbsa$H_tenure_his, na.rm = T), 3)`). Tenure segregation of Whites is exactly half that of Blacks ($H_B$ = `r round(mean(cbsa$H_tenure_nhw, na.rm = T), 3)`). Within Hispanics, in `r 100 * sum(cbsa$H_tenure_his > cbsa$H_inc_his, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of all valid observations over the four periods and 100 cities was tenure segregation higher than income segregation ($H^R$). For Blacks, that is the case in `r 100 * sum(cbsa$H_tenure_nhb > cbsa$H_inc_nhb, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent and for Whites in `r 100 * sum(cbsa$H_tenure_nhw > cbsa$H_inc_nhw, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent. The like-for-like $H(0.5)$ comparison strengthens this: tenure exceeds the within-group median-split income index in `r 100 * sum(cbsa$H_tenure_his > cbsa$H_inc_his_p50, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of Hispanic, `r 100 * sum(cbsa$H_tenure_nhb > cbsa$H_inc_nhb_p50, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of Black, and `r 100 * sum(cbsa$H_tenure_nhw > cbsa$H_inc_nhw_p50, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of White observations. While there are quite a few metros where there is greater income ($H^R$) than tenure segregation within racial groups, especially Blacks, my hypothesis holds in a clear majority of metro areas and this result is even more clear with the like-for-like ($H(0.5)$) comparison. The following table confirms this result with a significance test similar to above.
+
+```{r seg_diff_tests_race}
+modelsummary(
+  list("Tenure − Income H^R (NHW)"    = feols(I(H_tenure_nhw - H_inc_nhw)     ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Tenure − Income H(0.5) (NHW)" = feols(I(H_tenure_nhw - H_inc_nhw_p50) ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Tenure − Income H^R (NHB)"    = feols(I(H_tenure_nhb - H_inc_nhb)     ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Tenure − Income H(0.5) (NHB)" = feols(I(H_tenure_nhb - H_inc_nhb_p50) ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Tenure − Income H^R (His)"    = feols(I(H_tenure_his - H_inc_his)     ~ 1, cluster = ~CBSAFP + year, data = cbsa),
+       "Tenure − Income H(0.5) (His)" = feols(I(H_tenure_his - H_inc_his_p50) ~ 1, cluster = ~CBSAFP + year, data = cbsa)),
+  estimate    = "{estimate}{stars}",
+  statistic   = c("({std.error})", "p {p.value}"),
+  coef_rename = c("(Intercept)" = "Difference"),
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs"),
+  output      = "html"
+)
+```
+
+The following table presents exact values of all segregation indices averaged over the 20 year period for each metro area for the interested reader.
+
+```{r seg_table}
+cbsa |>
+  group_by(CBSAFP, CBSA_name) |>
+  summarise(across(c(H_inc, H_inc_p50, H_rent, H_val, H_tenure,
+                     H_inc_nhw, H_inc_nhw_p50, H_inc_nhb, H_inc_nhb_p50, H_inc_his, H_inc_his_p50,
+                     H_tenure_nhw, H_tenure_nhb, H_tenure_his),
+                   ~ mean(.x, na.rm = TRUE)),
+            .groups = "drop") |>
+  arrange(H_inc) |>
+  select(CBSA_name, H_inc, H_inc_p50, H_rent, H_val, H_tenure,
+         H_inc_nhw, H_inc_nhw_p50, H_tenure_nhw,
+         H_inc_nhb, H_inc_nhb_p50, H_tenure_nhb,
+         H_inc_his, H_inc_his_p50, H_tenure_his) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  rename("Metro Area"       = CBSA_name,
+         "Income H^R"       = H_inc,
+         "Income H(0.5)"    = H_inc_p50,
+         "Rent"             = H_rent,
+         "Home Value"       = H_val,
+         "Tenure"           = H_tenure,
+         "Inc H^R (W)"      = H_inc_nhw,
+         "Inc H(0.5) (W)"   = H_inc_nhw_p50,
+         "Tenure (W)"       = H_tenure_nhw,
+         "Inc H^R (B)"      = H_inc_nhb,
+         "Inc H(0.5) (B)"   = H_inc_nhb_p50,
+         "Tenure (B)"       = H_tenure_nhb,
+         "Inc H^R (H)"      = H_inc_his,
+         "Inc H(0.5) (H)"   = H_inc_his_p50,
+         "Tenure (H)"       = H_tenure_his) |>
+  knitr::kable(caption = "Segregation indices averaged across four ACS waves (2009–2024), ordered by overall income segregation") |>
+  kable_styling(full_width = FALSE, font_size = 9, bootstrap_options = c("striped", "condensed")) |>
+  add_header_above(c(" " = 1, "Overall" = 5, "NH-White" = 3, "NH-Black" = 3, "Hispanic" = 3))
+```
+
+
+# Segregation Moderates Income → Housing Quality
+
+The ABM predicts that income segregation acts as a moderator of the relationship between household income and housing quality. In more segregated cities, neighbourhoods are more polarised in their attractiveness and housing quality. High-income households cluster in high-quality areas while low-income households are confined to low-quality ones, steepening the income–quality gradient. The cross-level interaction hypothesis is:
+
+> In more segregated cities, the effect of household income on housing quality is stronger (steeper slope).
+
+We test this with a linear probability model regressing within-group quality rank on log equivalised household income, the city-level rank-order income segregation index H^R, and their interaction. Year fixed effects absorb national time trends and metro area (CBSA) fixed effects deals with time-constant properties of the metros. Standard errors are clustered by CBSA. 
+
+The control strategy therefore needs to control for time-varying variables within metro areas (net of national trends) that could bias the relationships between metropolitan-level income segregation, the quality proxy, and household equivalized income. I add the following control variables:
+
+- metro area income inequality (Gini index): 
+- metro area racial segregation (Theil index White vs. Black):
+- metro area unemployment rate:
+- metro area vacancy rate: 
+- individual race/ethnicity:
+- individual education (college):
+- individual age and age squared: 
+
+
+```{r quality_combined}
+## Individual controls: race/ethnicity, college degree, age
+## TODO household type: RELATE not saved in pums_hh.parquet — re-extract or derive
+## TODO city-level controls — run seg_indices_ACS.R to produce cbsa_controls.parquet,
+##   then update the read_parquet() call above and add to model formulas:
+##   + H_bw          Black-white segregation (binary Theil H, seg_indices_ACS.R)
+##   + gini_inc_cbsa      income inequality (weighted Gini, seg_indices_ACS.R)
+##   + vacancy_rate_cbsa  housing market tightness (seg_indices_ACS.R)
+##   + unemp_rate_cbsa    local unemployment rate (seg_indices_ACS.R)
+m1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE | YEAR + CBSAFP,
+            data = pums, weights = ~HHWT, cluster = "CBSAFP")
+m2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE | YEAR + CBSAFP,
+            data = pums, weights = ~HHWT, cluster = "CBSAFP")
+m3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE | YEAR + CBSAFP,
+            data = pums, weights = ~HHWT, cluster = "CBSAFP")
+
+modelsummary(
+  list("(1)" = m1, "(2)" = m2, "(3)" = m3),
+  stars   = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map = c("nobs", "r.squared"),
+  output  = "html"
+)
+```
+
+```{r quality_combined_plot}
+pred_df <- make_pred(m3, pums) # requires prediction helpers that I removed: rewrite
+
+ggplot(pred_df, aes(exp(log_equiv_inc), quality,
+                    color = seg_level, group = seg_level)) +
+  geom_ribbon(aes(ymin = q_lo, ymax = q_hi, fill = seg_level),
+              alpha = 0.15, color = NA) +
+  geom_line(linewidth = 1) +
+  scale_color_brewer(palette = "Set1", name = "Income Segregation (H^R)") +
+  scale_fill_brewer( palette = "Set1", name = "Income Segregation (H^R)") +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(x = "Equivalised Household Income (1999 USD)",
+       y = "Predicted Housing Quality (z-score)") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+
+## By Tenure
+
+The income–quality relationship may operate through different mechanisms for renters and owners. For renters, income determines which segment of the rental market a household can access. For owners, income determines purchasing power in the sales market, where neighbourhood sorting is reinforced by credit constraints and property tax capitalisation of local amenities. We therefore estimate the interaction model separately by tenure.
+
+```{r quality_tenure}
+m_r1 <- feols(quality ~ log_equiv_inc         | YEAR, data = pums_renters,
+              weights = ~HHWT, cluster = "CBSAFP")
+m_r2 <- feols(quality ~ log_equiv_inc + H_inc | YEAR, data = pums_renters,
+              weights = ~HHWT, cluster = "CBSAFP")
+m_r3 <- feols(quality ~ log_equiv_inc * H_inc | YEAR, data = pums_renters,
+              weights = ~HHWT, cluster = "CBSAFP")
+
+m_o1 <- feols(quality ~ log_equiv_inc         | YEAR, data = pums_owners,
+              weights = ~HHWT, cluster = "CBSAFP")
+m_o2 <- feols(quality ~ log_equiv_inc + H_inc | YEAR, data = pums_owners,
+              weights = ~HHWT, cluster = "CBSAFP")
+m_o3 <- feols(quality ~ log_equiv_inc * H_inc | YEAR, data = pums_owners,
+              weights = ~HHWT, cluster = "CBSAFP")
+
+modelsummary(
+  list("Renters (1)" = m_r1, "Renters (2)" = m_r2, "Renters (3)" = m_r3,
+       "Owners (1)"  = m_o1, "Owners (2)"  = m_o2, "Owners (3)"  = m_o3),
+  stars   = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map = c("nobs", "r.squared"),
+  output  = "html"
+)
+```
+

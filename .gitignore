@@ -1,0 +1,11 @@
+# Data (large files, reproducible via download and prep scripts)
+data/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# OS
+.DS_Store
