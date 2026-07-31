@@ -666,14 +666,16 @@ newdata <- expand.grid(
 ) |>
   mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
 
-X <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
-                    gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
-                  data = newdata)[, names(b)]
+V_key <- V[c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc"),
+            c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc")]
 
 newdata <- newdata |>
   mutate(
-    y_hat = as.numeric(X %*% b),
-    se    = sqrt(diag(X %*% V %*% t(X))),
+    y_hat = predict(m3, newdata = newdata),
+    se    = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_key %*% z))
+            }, log_equiv_inc, H_inc),
     ylo   = y_hat - 1.96 * se,
     yhi   = y_hat + 1.96 * se
   )
@@ -805,15 +807,16 @@ newdata_b <- expand.grid(
 ) |>
   mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
 
-# Year FE absorbed (predictions at the average year effect, i.e. FE = 0)
-X_b <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
-                      gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
-                    data = newdata_b)[, names(b_coef)]
+V_b_key <- b_vcov[c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc"),
+                   c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc")]
 
 newdata_b <- newdata_b |>
   mutate(
-    y_hat = as.numeric(X_b %*% b_coef),
-    se    = sqrt(diag(X_b %*% b_vcov %*% t(X_b))),
+    y_hat = predict(b3, newdata = newdata_b),
+    se    = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_b_key %*% z))
+            }, log_equiv_inc, H_inc),
     ylo   = y_hat - 1.96 * se,
     yhi   = y_hat + 1.96 * se
   )
@@ -901,14 +904,16 @@ newdata_v <- expand.grid(
 ) |>
   mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
 
-X_v <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
-                      gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
-                    data = newdata_v)[, names(v_coef)]
+V_v_key <- v_vcov[c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc"),
+                   c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc")]
 
 newdata_v <- newdata_v |>
   mutate(
-    y_hat = as.numeric(X_v %*% v_coef),
-    se    = sqrt(diag(X_v %*% v_vcov %*% t(X_v))),
+    y_hat = predict(v3, newdata = newdata_v),
+    se    = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_v_key %*% z))
+            }, log_equiv_inc, H_inc),
     ylo   = y_hat - 1.96 * se,
     yhi   = y_hat + 1.96 * se
   )
@@ -992,14 +997,16 @@ newdata_c <- expand.grid(
 ) |>
   mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
 
-X_c <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
-                      gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
-                    data = newdata_c)[, names(c_coef)]
+V_c_key <- c_vcov[c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc"),
+                   c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc")]
 
 newdata_c <- newdata_c |>
   mutate(
-    y_hat = as.numeric(X_c %*% c_coef),
-    se    = sqrt(diag(X_c %*% c_vcov %*% t(X_c))),
+    y_hat = predict(c3, newdata = newdata_c),
+    se    = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_c_key %*% z))
+            }, log_equiv_inc, H_inc),
     ylo   = y_hat - 1.96 * se,
     yhi   = y_hat + 1.96 * se
   )
