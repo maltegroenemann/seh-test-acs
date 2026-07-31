@@ -31,7 +31,10 @@
 #   valueh_real     VALUEH   * CPI99   (property value;    NA for renters / topcoded)
 #   inctot_real     INCTOT   * CPI99
 #   rent_to_inc     (RENTGRS * 12) / HHINCOME  [renters, HHINCOME > 0 only]
-#                   (CPI99 cancels — result is already deflator-invariant)
+#                   RENTGRS is monthly; ×12 annualises it to match HHINCOME (annual).
+#                   CPI99 cancels — result is already deflator-invariant.
+#   val_to_inc      valueh_real / hhincome_real  [owners, hhincome_real > 0 only]
+#                   Property value-to-income ratio; stock/flow but deflator-invariant.
 #   crowding        NUMPREC / ROOMS
 #   deficient       1 if KITCHEN == 2 OR PLUMBING == 3
 #   renter          1 if OWNERSHP == 2
@@ -115,7 +118,9 @@ county_cbsa <- counties(year = 2020) |>
 # 2020 CBSA names
 cbsa_names <- core_based_statistical_areas(year = 2020, cb = TRUE) |>
   as_tibble() |>
-  select(CBSAFP = GEOID, CBSA_name = NAME)
+  select(CBSAFP = GEOID, CBSA_name = NAME) |>
+  mutate(cbsa_name_short = sub("^([^-/]+?)(?:[-/][^,]*)?,\\s*([A-Z]{2}).*$",
+                                "\\1, \\2", CBSA_name))
 
 # Helper: read one Geocorr file and return a PUMA → CBSA table
 read_geocorr <- function(file, puma_col, vintage) {
@@ -215,6 +220,13 @@ pums <- pums |>
       NA_real_
     ),
 
+    # Property value-to-income ratio (CPI99 cancels; owners with positive income)
+    val_to_inc = if_else(
+      as.integer(OWNERSHP) == 1L & HHINCOME > 0,
+      (VALUEH * CPI99) / (HHINCOME * CPI99),
+      NA_real_
+    ),
+
     # Persons per room (crowding)
     crowding = as.double(NUMPREC) / as.double(ROOMS),
 
@@ -289,7 +301,7 @@ pums <- pums |>
 pums <- pums |>
   select(
     # Identifiers
-    YEAR, SERIAL, CBSAFP, CBSA_name, STATEFIP, PUMA, PUMA_id, puma_vintage,
+    YEAR, SERIAL, CBSAFP, CBSA_name, cbsa_name_short, STATEFIP, PUMA, PUMA_id, puma_vintage,
     # Survey design weights
     HHWT, PERWT, CLUSTER, STRATA,
     # Housing unit
@@ -299,7 +311,7 @@ pums <- pums |>
     # CPI99 retained so city-level scripts can deflate raw HHINCOME without top-coding
     HHINCOME, CPI99, hhincome_real, equiv_income, log_equiv_inc,
     RENTGRS,  rentgrs_real, rent_to_inc,
-    VALUEH,   valueh_real,
+    VALUEH,   valueh_real,  val_to_inc,
     # Housing quality proxies
     quality, quality_rc, recent_mover,
     # Household head (person-level)

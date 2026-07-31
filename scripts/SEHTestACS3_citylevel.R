@@ -54,10 +54,20 @@
 #   From PUMS microdata (pums_hh.parquet):
 #   gini_inc_cbsa     weighted Gini of equivalised household income
 #   unemp_rate_cbsa   unemployment rate among household heads in the labour force
+#   gini_rent_cbsa         weighted Gini of gross rent in 1999 USD (renters only; HHWT)
+#   gini_val_cbsa          weighted Gini of home value in 1999 USD (owners only; HHWT)
+#   gini_housing_cbsa      pooled Gini of housing cost (rent | imputed rent); metro×year cap rate
+#   gini_housing_cbsa_5pct pooled Gini; fixed 5 % p.a. cap rate (robustness)
+#   gini_housing_cbsa_7pct pooled Gini; fixed 7 % p.a. cap rate (robustness)
+#   gini_housing_cbsa_natl pooled Gini; year-specific national cap rate (robustness)
 #
 # Outputs:
 #   data/cbsa_vars.parquet       one row per CBSA × year
-#   data/pums_analysis.parquet   pums_hh joined with cbsa_controls (one row per HH)
+#   data/pums_analysis.parquet   pums_hh joined with cbsa_controls, plus:
+#     cap_rate_metro   metro × year cap rate (12 × med_rent / med_val; from PUMS)
+#     cost_to_inc      valueh_real × cap_rate_metro / hhincome_real
+#                      annualised imputed cost-to-income ratio [owners, hhincome_real > 0]
+#                      flow/flow analog to rent_to_inc; CPI99 cancels
 
 
 ## ── SETUP ────────────────────────────────────────────────────────────────────
@@ -434,7 +444,7 @@ seg_vacancy <- acs |>
 # block returns NA when the denominator sums to zero (all edu_tot are NA).
 
 acs_agg <- acs |>
-  group_by(CBSAFP, CBSA_name, year) |>
+  group_by(CBSAFP, year) |>
   summarise(
     pop_cbsa          = sum(pop,       na.rm = TRUE),
     pct_renter_cbsa   = sum(rent,      na.rm = TRUE) /
@@ -473,6 +483,12 @@ wtd_gini <- function(x, w) {
   sum(w * x * (2 * F - 1), na.rm = TRUE) / mu
 }
 
+wtd_median <- function(x, w) {
+  ord <- order(x)
+  x   <- x[ord]; w <- w[ord]
+  x[which(cumsum(w) / sum(w) >= 0.5)[1]]
+}
+
 # Income inequality: weighted Gini of equivalised household income within CBSA × year.
 # Uses HHINCOME * CPI99 (untop-coded) so the full distribution is reflected.
 ineq <- pums |>
@@ -498,6 +514,107 @@ unemp <- pums |>
   rename(year = YEAR)
 
 
+## ── RENT AND HOME VALUE INEQUALITY ───────────────────────────────────────────
+# Weighted Gini of gross rent (renters) and home value (owners), using PUMS
+# inflation-adjusted real values (1999 USD). Neither variable is top-coded in
+# dataprepPUMS.R (unlike hhincome_real), so the full distribution is reflected.
+# RENTGRS is already NA for owners and VALUEH is NA for renters; only strictly
+# positive values are included (the GQ == 1 filter excludes institutional units
+# where VALUEH == 0 could appear).
+#
+# Note: the PUMS `quality` variable (z-score of rentgrs_real or valueh_real,
+# standardised within YEAR × CBSA × tenure) is not suitable for Gini because
+# z-scores take negative values. gini_rent_cbsa and gini_val_cbsa are the
+# natural inequality counterparts to quality within each tenure group.
+
+ineq_rent <- pums |>
+  filter(renter == 1L, !is.na(rentgrs_real), rentgrs_real > 0) |>
+  group_by(CBSAFP, YEAR) |>
+  summarise(
+    gini_rent_cbsa = wtd_gini(rentgrs_real, HHWT),
+    .groups = "drop"
+  ) |>
+  rename(year = YEAR)
+
+ineq_val <- pums |>
+  filter(renter == 0L, !is.na(valueh_real), valueh_real > 0) |>
+  group_by(CBSAFP, YEAR) |>
+  summarise(
+    gini_val_cbsa = wtd_gini(valueh_real, HHWT),
+    .groups = "drop"
+  ) |>
+  rename(year = YEAR)
+
+
+## ── POOLED HOUSING COST GINI ─────────────────────────────────────────────────
+# Combines renter and owner housing costs on a common monthly scale.
+# For owners: imputed monthly rent = valueh_real × cap_rate / 12.
+# For renters: gross rent (rentgrs_real) is used directly.
+# The pooled Gini captures both within-tenure inequality AND the renter/owner gap.
+#
+# Four cap rate variants (main spec + three robustness checks):
+#   metro×year  12 × wtd_median(rentgrs_real) / wtd_median(valueh_real), from PUMS.
+#               Reflects each metro's actual rent-to-price relationship per wave.
+#   5 % p.a.    Standard housing-economics benchmark (fixed).
+#   7 % p.a.    Higher cost-of-capital alternative (fixed).
+#   national    HHWT-weighted mean of metro cap rates per wave. Removes cross-metro
+#               variation in cap rates; if results hold vs. metro spec, the local
+#               rent-to-price ratio is not driving findings.
+
+# Metro×year PUMS weighted medians
+med_rent_pums <- pums |>
+  filter(renter == 1L, !is.na(rentgrs_real), rentgrs_real > 0) |>
+  group_by(CBSAFP, YEAR) |>
+  summarise(med_rent = wtd_median(rentgrs_real, HHWT), .groups = "drop")
+
+med_val_pums <- pums |>
+  filter(renter == 0L, !is.na(valueh_real), valueh_real > 0) |>
+  group_by(CBSAFP, YEAR) |>
+  summarise(med_val = wtd_median(valueh_real, HHWT), .groups = "drop")
+
+cap_rates <- med_rent_pums |>
+  left_join(med_val_pums, by = c("CBSAFP", "YEAR")) |>
+  mutate(cap_rate_metro = 12 * med_rent / med_val)
+
+# Year-specific national cap rate: HHWT-weighted mean across metros
+cap_rate_natl <- cap_rates |>
+  left_join(
+    pums |>
+      group_by(CBSAFP, YEAR) |>
+      summarise(tot_hhwt = sum(HHWT, na.rm = TRUE), .groups = "drop"),
+    by = c("CBSAFP", "YEAR")
+  ) |>
+  group_by(YEAR) |>
+  summarise(
+    cap_rate_natl = weighted.mean(cap_rate_metro, tot_hhwt, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Pooled Gini for all four specs
+gini_housing <- pums |>
+  filter(
+    (renter == 1L & !is.na(rentgrs_real) & rentgrs_real > 0) |
+    (renter == 0L & !is.na(valueh_real)  & valueh_real  > 0)
+  ) |>
+  left_join(cap_rates   |> select(CBSAFP, YEAR, cap_rate_metro), by = c("CBSAFP", "YEAR")) |>
+  left_join(cap_rate_natl, by = "YEAR") |>
+  mutate(
+    hcost_metro = if_else(renter == 1L, rentgrs_real, valueh_real * cap_rate_metro / 12),
+    hcost_5pct  = if_else(renter == 1L, rentgrs_real, valueh_real * 0.05 / 12),
+    hcost_7pct  = if_else(renter == 1L, rentgrs_real, valueh_real * 0.07 / 12),
+    hcost_natl  = if_else(renter == 1L, rentgrs_real, valueh_real * cap_rate_natl / 12)
+  ) |>
+  group_by(CBSAFP, YEAR) |>
+  summarise(
+    gini_housing_cbsa      = wtd_gini(hcost_metro[!is.na(hcost_metro)], HHWT[!is.na(hcost_metro)]),
+    gini_housing_cbsa_5pct = wtd_gini(hcost_5pct,  HHWT),
+    gini_housing_cbsa_7pct = wtd_gini(hcost_7pct,  HHWT),
+    gini_housing_cbsa_natl = wtd_gini(hcost_natl,  HHWT),
+    .groups = "drop"
+  ) |>
+  rename(year = YEAR)
+
+
 ## ── MERGE AND SAVE ────────────────────────────────────────────────────────────
 
 cbsa_controls <- seg_income |>
@@ -515,13 +632,31 @@ cbsa_controls <- seg_income |>
   left_join(seg_vacancy,    by = c("CBSAFP", "year")) |>
   left_join(acs_agg,        by = c("CBSAFP", "year")) |>
   left_join(ineq,           by = c("CBSAFP", "year")) |>
-  left_join(unemp,          by = c("CBSAFP", "year"))
+  left_join(unemp,          by = c("CBSAFP", "year")) |>
+  left_join(ineq_rent,      by = c("CBSAFP", "year")) |>
+  left_join(ineq_val,       by = c("CBSAFP", "year")) |>
+  left_join(gini_housing,   by = c("CBSAFP", "year"))
 
+
+cbsa_controls <- cbsa_controls |>
+  left_join(acs |> distinct(CBSAFP, CBSA_name, cbsa_name_short), by = "CBSAFP")
 
 write_parquet(cbsa_controls, file.path(data_dir, "cbsa_vars.parquet"))
 
 pums_analysis <- pums |>
-  left_join(cbsa_controls, by = c("CBSAFP", "YEAR" = "year"))
+  left_join(cbsa_controls |> select(-CBSA_name, -cbsa_name_short),
+            by = c("CBSAFP", "YEAR" = "year")) |>
+  left_join(cap_rates |> select(CBSAFP, YEAR, cap_rate_metro), by = c("CBSAFP", "YEAR")) |>
+  mutate(
+    # Imputed annual cost-to-income ratio for owners (CPI99 cancels; owners with
+    # positive income and value). cap_rate_metro = 12 * med_rent / med_val, so
+    # valueh_real * cap_rate_metro is the annualised imputed housing cost.
+    cost_to_inc = if_else(
+      renter == 0L & hhincome_real > 0 & !is.na(valueh_real) & valueh_real > 0,
+      valueh_real * cap_rate_metro / hhincome_real,
+      NA_real_
+    )
+  )
 
 write_parquet(pums_analysis, file.path(data_dir, "pums_analysis.parquet"))
 

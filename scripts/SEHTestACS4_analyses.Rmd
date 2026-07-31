@@ -16,6 +16,7 @@ knitr::opts_chunk$set(echo    = FALSE,
                       error   = FALSE,
                       out.width = "100%")
 
+# Packages
 library(nanoparquet)
 library(dplyr)
 library(tidyr)
@@ -26,14 +27,21 @@ library(modelsummary)
 library(latex2exp)
 library(kableExtra)
 
+# Plotting
 cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
 lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
 shapes <- c(0, 1, 2, 5, 6)
 
-# TODO for replication: change path
+# File Paths
+# TODO for replication: change paths
+# local paths for development
 #data_dir <- "~/Projects/SEHTestACS/data/"
+#results_dir <- "../results/"
+# paths at HELIX HPC
 data_dir <- "./data/"
+results_dir <- "./results/"
 
+# Data
 pums <- read_parquet(paste0(data_dir, "pums_analysis.parquet")) |>
   mutate(YEAR = as.integer(YEAR),
          # race_eth: nhwhite as reference category
@@ -109,8 +117,8 @@ The two racial measures correlate 0.90, which is partly definitional, since mult
 
 ```{r}
 cbsa |>
-  select(CBSAFP, CBSA_name, year, H_inc, H_inc_p50, H_rent, H_val, H_tenure) |>
-  mutate(CBSA_name = forcats::fct_reorder(CBSA_name, H_inc, .fun = mean, na.rm = TRUE)) |>
+  select(CBSAFP, cbsa_name_short, year, H_inc, H_inc_p50, H_rent, H_val, H_tenure) |>
+  mutate(cbsa_name_short = forcats::fct_reorder(cbsa_name_short, H_inc, .fun = mean, na.rm = TRUE)) |>
   pivot_longer(starts_with("H_"),
                names_to = "H_dimension",
                values_to = "H_index") |>
@@ -121,14 +129,14 @@ cbsa |>
                                  H_dimension == "H_tenure"  ~ "Tenure Type")) |>
   ggplot() +
   aes(y = H_index,
-      x = CBSA_name,
+      x = cbsa_name_short,
       colour = H_dimension,
       shape = H_dimension,
       group = H_dimension) +
   geom_point() +
   geom_line() +
   facet_grid(rows = vars(year)) +
-  labs(x = "Metro Area", y = NULL, colour = NULL, shape = NULL) +
+  labs(x = NULL, y = NULL, colour = NULL, shape = NULL) +
   scale_color_manual(values = cb_palette,
                      labels = c("Household Income (H^R)"   = TeX("Household Income $H^R$"),
                                 "Household Income H(0.5)"  = TeX("Household Income $H(0.5)$"),
@@ -146,6 +154,7 @@ cbsa |>
   theme_bw() +
   theme(legend.position = "bottom",
         axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+ggsave(paste0(results_dir, "seg_comparison.pdf"), height = 20, width = 35, units = "cm")
 ```
 
 Rent is more unevenly distributed than income in `r 100 * sum(cbsa$H_rent > cbsa$H_inc, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of all valid observations of the 100 cities and 4 periods. The estimated home value is spatially more uneven in `r 100 * sum(cbsa$H_val > cbsa$H_inc, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of observations. Housing tenure (renter vs. owner-occupier) is more unevenly placed than household income ($H^R$) in `r 100 * sum(cbsa$H_tenure > cbsa$H_inc, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of all valid cases. The like-for-like comparison using $H(0.5)$ — binary H at the median income cutpoint, directly comparable to the single-split tenure H — yields the same conclusion: tenure exceeds income segregation in `r 100 * sum(cbsa$H_tenure > cbsa$H_inc_p50, na.rm = T) / length(!is.na(cbsa$CBSAFP))` percent of observations.
@@ -286,6 +295,307 @@ cbsa |>
   add_header_above(c(" " = 1, "Overall" = 5, "NH-White" = 3, "NH-Black" = 3, "Hispanic" = 3))
 ```
 
+# Segregation Moderates Income Inequality → Housing Inequality
+
+The second city-level hypothesis I test here states that more unequal cities also show higher inequality in housing quality (proxied by rent / value). While it makes sense that a higher income inequality leads to a more unequal supply of housing quality because different people can afford different characteristics of housing. But my model states that investment decisions by landlords are contingent on local developments because landlords are side-ways looking under investment uncertainty. For the higher income inequality to materialize into higher inequality in housing, neighborhoods need to have different average incomes. Therefore, segregation moderates the relationship between income and rent inequality.
+
+## Operationalisation of Housing Cost Inequality
+
+The dependent variable is a Gini coefficient of housing costs pooled across renters and owners within each CBSA × year cell. Combining both tenure groups is necessary to capture two distinct dimensions of housing cost inequality simultaneously: *within-tenure* inequality (the spread of rents among renters, or of values among owners) and the *between-group* gap (the cost difference between renting and owning). A within-tenure-only measure — for instance, a renter-share-weighted average of separate Gini coefficients for rent and home value — is blind to the latter. Because the ABM predicts that segregation translates income inequality into housing inequality by sorting households into differentially desirable neighbourhoods regardless of tenure, the DV should reflect the full cross-tenure distribution of housing costs.
+
+The central measurement challenge is that renters and owners face costs on incompatible scales: monthly gross rent for renters and total market value for owners. We convert home values to an imputed monthly user cost,
+
+$$u_i = v_i \times \hat{r}_{mt} \;/\; 12,$$
+
+where $v_i$ is the inflation-adjusted home value (`valueh_real`, 1999 USD) and $\hat{r}_{mt}$ is a metro- and wave-specific capitalisation rate derived from PUMS weighted medians:
+
+$$\hat{r}_{mt} = 12 \;\times\; \widetilde{\mathrm{rent}}_{mt} \;/\; \widetilde{\mathrm{value}}_{mt}.$$
+
+The factor of 12 follows from the standard real-estate definition of the annual gross yield: $r = \text{annual rent} / \text{value} = 12 \times \text{monthly rent} / \text{value}$. Dividing by 12 in the user-cost formula then recovers a monthly figure, so the two factors cancel and the imputed cost simplifies to $u_i = v_i \times \widetilde{\mathrm{rent}}_{mt} / \widetilde{\mathrm{value}}_{mt}$. Both medians are computed from the same PUMS records used for the Gini, using household survey weights (HHWT). Cross-metro variation in $\hat{r}$ is substantively meaningful — the rent-to-price ratio is systematically lower in supply-constrained coastal metros than in Rust Belt markets — and should be preserved rather than suppressed by a fixed national rate.
+
+**Key assumption.** The formula embeds the assumption that rent is *proportional* to value across the full within-metro quality distribution: a home worth twice the median is assumed to rent for twice the median rent. Equivalently, the cap rate is treated as constant across quality tiers within a metro. This is a standard first-order approximation but is unlikely to hold exactly: in most markets, luxury units command a lower gross yield than entry-level units (i.e., the cap rate declines with quality), which means the formula overstates imputed costs at the top of the value distribution and understates them at the bottom. The resulting Gini will therefore be somewhat compressed relative to the true housing cost distribution. This bias cannot be eliminated without observing what owner-occupied units would rent for in the current market, which is not available in ACS or PUMS. The pooled monthly housing cost is then
+
+$$c_i = \begin{cases} \text{rentgrs\_real}_i & \text{renter} \\ v_i \times \hat{r}_{mt} / 12 & \text{owner,} \end{cases}$$
+
+and `gini_housing_cbsa` is the HHWT-weighted Gini of $c_i$ within each CBSA × year (Brown formula, `wtd_gini` in `SEHTestACS3_citylevel.R`).
+
+**Robustness checks on the capitalisation rate.** The metro-specific $\hat{r}_{mt}$ could confound the Gini if the rent-to-price ratio itself co-varies with income inequality or segregation, creating a spurious correlation rather than a genuine measurement of housing cost inequality. Three alternative cap rate assumptions are therefore carried as robustness checks:
+
+| Variant | Cap rate | What it isolates |
+|---|---|---|
+| `gini_housing_cbsa` | Metro×year from PUMS medians | Main specification |
+| `gini_housing_cbsa_5pct` | Fixed 5 % p.a. | Standard housing-economics benchmark |
+| `gini_housing_cbsa_7pct` | Fixed 7 % p.a. | Higher cost-of-capital assumption |
+| `gini_housing_cbsa_natl` | Year-specific national rate | Removes cross-metro variation in cap rates |
+
+The year-specific national rate is particularly informative: if estimates are stable when switching from `gini_housing_cbsa` to `gini_housing_cbsa_natl`, cross-metro differences in rent-to-price ratios are not driving the results.
+
+## Test of the Hypothesis
+
+```{r housing_ineq_models}
+# Mean-centre continuous predictors so main effects are evaluated at the sample
+# mean of the moderator rather than at zero (which is outside the observed range)
+cbsa <- cbsa |>
+  mutate(
+    gini_inc_c = gini_inc_cbsa - mean(gini_inc_cbsa, na.rm = TRUE),
+    H_inc_c    = H_inc         - mean(H_inc,         na.rm = TRUE)
+  )
+
+cm1 <- feols(gini_housing_cbsa ~ gini_inc_c | year,
+             data = cbsa, cluster = ~CBSAFP + year)
+cm2 <- feols(gini_housing_cbsa ~ gini_inc_c * H_inc_c | year,
+             data = cbsa, cluster = ~CBSAFP + year)
+cm3 <- feols(gini_housing_cbsa ~ gini_inc_c * H_inc_c + H_bw +
+               unemp_rate_cbsa + vacancy_rate_cbsa + pct_renter_cbsa | year,
+             data = cbsa, cluster = ~CBSAFP + year)
+
+coef_names <- c(
+  "gini_inc_c"         = "Income Gini (centred)",
+  "H_inc_c"            = "Income Segregation H^R (centred)",
+  "gini_inc_c:H_inc_c" = "Income Gini × H^R",
+  "H_bw"               = "Black-White Segregation H",
+  "unemp_rate_cbsa"    = "Unemployment Rate",
+  "vacancy_rate_cbsa"  = "Vacancy Rate",
+  "pct_renter_cbsa"    = "Renter Share"
+)
+
+modelsummary(
+  list("(1)" = cm1, "(2)" = cm2, "(3)" = cm3),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  output      = "html"
+)
+```
+
+The results consistently show a positive and significant main effect of income inequality on housing cost inequality. The moderation hypothesis — that income segregation amplifies this relationship — receives directional support (positive interaction) when adding the control variables but does not reach significance.
+
+The year-FE specification is the theoretically appropriate primary test: the ABM generates cross-sectional predictions by comparing equilibria across cities that differ in their level of segregation. In principle, within-metro changes in segregation would also constitute a valid test of the mechanism — if neighbourhoods diverge in their income composition, the ABM predicts that developers and landlords will respond by investing differently across places, widening the housing cost distribution. However, two features of the setting work against detecting this effect. First, residential segregation is highly stable within cities over medium-run horizons — changes in H^R within any single metro across the four waves are likely small relative to cross-metro differences. Second, even genuine increases in segregation would translate into housing cost inequality only with a substantial lag: upgrading of desirable neighbourhoods, decay of neglected ones, and new construction all operate on timescales of years to decades that the 5-year inter-wave gaps cannot capture. The first-differences model below addresses this directly.
+
+## Robustness: Cap Rate Sensitivity
+
+Model (3) re-estimated with the three alternative cap rates. Stability of the interaction coefficient across specifications rules out that the rent-to-price ratio assumption is driving the moderation result.
+
+```{r housing_ineq_robustness}
+modelsummary(
+  list(
+    "Metro"    = cm3,
+    "Fixed 5%" = feols(gini_housing_cbsa_5pct ~ gini_inc_c * H_inc_c + H_bw +
+                         unemp_rate_cbsa + vacancy_rate_cbsa + pct_renter_cbsa | year,
+                       data = cbsa, cluster = ~CBSAFP + year),
+    "Fixed 7%" = feols(gini_housing_cbsa_7pct ~ gini_inc_c * H_inc_c + H_bw +
+                         unemp_rate_cbsa + vacancy_rate_cbsa + pct_renter_cbsa | year,
+                       data = cbsa, cluster = ~CBSAFP + year),
+    "National" = feols(gini_housing_cbsa_natl ~ gini_inc_c * H_inc_c + H_bw +
+                         unemp_rate_cbsa + vacancy_rate_cbsa + pct_renter_cbsa | year,
+                       data = cbsa, cluster = ~CBSAFP + year)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = coef_names,
+  #coef_omit   = "^(?!.*gini_inc_c|.*H_inc_c)",
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  output      = "html"
+)
+```
+
+## First-Differences Model
+
+The levels model tests whether more segregated cities have higher housing cost inequality. The first-differences (FD) model asks a different question: does a rise in income inequality translate into a larger rise in housing costs in more segregated cities? This directly tests the temporal mechanism — segregation shaping how income inequality propagates through developer and landlord investment decisions over time — without the between-metro confounding that motivates the concern about the year-FE estimates.
+
+First-differencing removes all time-constant between-city heterogeneity (including persistently high-demand metros vs. stagnating ones) without requiring unit FE and therefore without Nickell bias. Three design choices follow from the nature of the estimand. First, the DV and main predictor are differenced ($\Delta$), but income segregation enters as its *lagged level* $H^R_{m,t-5}$: it is the structural context within which income inequality changes play out, it is predetermined relative to $\Delta\text{GiniHousing}$, and as established above it barely moves within metros over the sample period. Second, all time-varying controls enter as period changes ($\Delta$) to match the estimand and absorb demand and economic activity shocks that could confound the interaction — in particular changes in population growth, unemployment, vacancy, renter share, and racial segregation. Population growth (`pop_growth_cbsa`) is already computed as a period growth rate in `SEHTestACS3_citylevel.R` and enters directly. Third, year FE are retained as two dummies for the three inter-wave difference periods (2009→2014, 2014→2019, 2019→2024) to absorb national trends in housing cost growth. Standard errors are clustered by CBSAFP only rather than two-way, because the FD sample contains only three period clusters — well below the threshold for reliable two-way inference — and the year FE already absorb systematic inter-period shifts, leaving within-CBSA serial correlation as the dominant source of dependence. Segregation $H^R_{m,t-5}$ is mean-centred so that the main effect of $\Delta\text{GiniInc}$ is evaluated at the average metro.
+
+```{r housing_ineq_fd}
+cbsa_fd <- cbsa |>
+  arrange(CBSAFP, year) |>
+  group_by(CBSAFP) |>
+  mutate(
+    d_gini_housing      = gini_housing_cbsa      - lag(gini_housing_cbsa),
+    d_gini_housing_5pct = gini_housing_cbsa_5pct - lag(gini_housing_cbsa_5pct),
+    d_gini_housing_7pct = gini_housing_cbsa_7pct - lag(gini_housing_cbsa_7pct),
+    d_gini_housing_natl = gini_housing_cbsa_natl - lag(gini_housing_cbsa_natl),
+    d_gini_rent         = gini_rent_cbsa         - lag(gini_rent_cbsa),
+    d_gini_val          = gini_val_cbsa          - lag(gini_val_cbsa),
+    d_gini_inc          = gini_inc_cbsa          - lag(gini_inc_cbsa),
+    d_H_bw              = H_bw                   - lag(H_bw),
+    d_unemp             = unemp_rate_cbsa        - lag(unemp_rate_cbsa),
+    d_vacancy           = vacancy_rate_cbsa      - lag(vacancy_rate_cbsa),
+    d_pct_renter        = pct_renter_cbsa        - lag(pct_renter_cbsa),
+    H_inc_lag           = lag(H_inc)
+  ) |>
+  ungroup() |>
+  filter(!is.na(d_gini_housing)) |>
+  mutate(H_inc_lag_c = H_inc_lag - mean(H_inc_lag, na.rm = TRUE))
+
+fd_coef_names <- c(
+  "d_gini_inc"             = "\u0394Income Gini",
+  "H_inc_lag_c"            = "Income Segregation H\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_inc_lag_c" = "\u0394Income Gini \u00d7 H\u1d3f (t\u22125)",
+  "d_H_bw"                 = "\u0394Black-White Segregation H",
+  "d_unemp"                = "\u0394Unemployment Rate",
+  "d_vacancy"              = "\u0394Vacancy Rate",
+  "d_pct_renter"           = "\u0394Renter Share",
+  "pop_growth_cbsa"        = "Population Growth"
+)
+
+cm_fd1 <- feols(d_gini_housing ~ d_gini_inc | year,
+                data = cbsa_fd, cluster = ~CBSAFP)
+cm_fd2 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c | year,
+                data = cbsa_fd, cluster = ~CBSAFP)
+cm_fd3 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c + d_H_bw +
+                  d_unemp + d_vacancy + d_pct_renter + pop_growth_cbsa | year,
+                data = cbsa_fd, cluster = ~CBSAFP)
+
+modelsummary(
+  list("FD 1" = cm_fd1, "FD 2" = cm_fd2, "FD 3" = cm_fd3),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  output      = "html"
+)
+```
+
+The main effect of income inequality changes ($\Delta$Income Gini) on housing cost inequality changes is positive and consistent across models, mirroring the levels result. The interaction between $\Delta$Income Gini and lagged segregation $H^R_{t-5}$ is positive and substantively large, consistent with the theoretical prediction that more segregated cities translate rising income inequality into rising housing cost inequality more strongly. It does not, however, reach conventional significance thresholds.
+
+Two features of the FD design limit statistical power here. First, first-differencing removes the between-metro variance that constitutes the bulk of variation in both income inequality and segregation, leaving only the modest within-metro, period-to-period changes to identify the interaction. Second, with only three difference periods per metro and one-way CBSAFP clustering, degrees of freedom for the year dimension are exhausted, making the standard errors conservative. The positive direction of the interaction is nonetheless consistent across the trivariate model and the full specification with change controls — including controls specifically designed to absorb the alternative explanation that high-segregation metros are simply faster-growing cities with rising housing demand. The effect is slightly reduced in the model with controls but is still sizeable. The consistency of the sign across both the levels and FD models constitutes cautious support for the moderation hypothesis.
+
+### Predicted Values
+
+The plot below illustrates the moderation: predicted $\Delta$Housing Cost Gini as a function of $\Delta$Income Gini at three levels of lagged income segregation (low = $-1$ SD, mean = 0, high = $+1$ SD). All other predictors are held at zero (a no-change baseline). Year FE are absorbed. The steeper slope for high-segregation metros captures the predicted amplification effect.
+
+```{r housing_ineq_fd_pred, fig.height=4}
+b      <- coef(cm_fd3)
+V      <- vcov(cm_fd3)[c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c"),
+                        c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c")]
+h_sd   <- sd(cbsa_fd$H_inc_lag_c, na.rm = TRUE)
+x_seq  <- seq(min(cbsa_fd$d_gini_inc, na.rm = TRUE),
+              max(cbsa_fd$d_gini_inc, na.rm = TRUE),
+              length.out = 100)
+
+h_levels <- c(-h_sd, 0, h_sd)
+h_labels <- c("Low ($-$1 SD)", "Mean", "High ($+$1 SD)")
+
+expand.grid(d_gini_inc = x_seq, H_inc_lag_c = h_levels) |>
+  mutate(
+    H_label = factor(H_inc_lag_c, levels = h_levels, labels = h_labels),
+    y_hat   = b["d_gini_inc"]             * d_gini_inc
+            + b["H_inc_lag_c"]            * H_inc_lag_c
+            + b["d_gini_inc:H_inc_lag_c"] * d_gini_inc * H_inc_lag_c,
+    se      = mapply(function(x, h) {
+                z <- c(x, h, x * h)
+                sqrt(as.numeric(z %*% V %*% z))
+              }, d_gini_inc, H_inc_lag_c),
+    ylo     = y_hat - 1.96 * se,
+    yhi     = y_hat + 1.96 * se
+  ) |>
+  ggplot(aes(x = d_gini_inc, colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  labs(
+    x       = TeX("$\\Delta$ Income Gini"),
+    y       = TeX("$\\Delta$ Housing Cost Gini")
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "seg_ineqFD.pdf"), height = 12, width = 18, units = "cm")
+```
+
+Income inequality also changes little over time within metros. The range in delta Gini over five years is only about 0.05.
+
+
+### Cap Rate Robustness
+
+FD 3 re-estimated with the three alternative cap rates, showing only the key coefficients.
+
+```{r housing_ineq_fd_rob}
+modelsummary(
+  list(
+    "Metro"    = cm_fd3,
+    "Fixed 5%" = feols(d_gini_housing_5pct ~ d_gini_inc * H_inc_lag_c + d_H_bw +
+                         d_unemp + d_vacancy + d_pct_renter + pop_growth_cbsa | year,
+                       data = cbsa_fd, cluster = ~CBSAFP),
+    "Fixed 7%" = feols(d_gini_housing_7pct ~ d_gini_inc * H_inc_lag_c + d_H_bw +
+                         d_unemp + d_vacancy + d_pct_renter + pop_growth_cbsa | year,
+                       data = cbsa_fd, cluster = ~CBSAFP),
+    "National" = feols(d_gini_housing_natl ~ d_gini_inc * H_inc_lag_c + d_H_bw +
+                         d_unemp + d_vacancy + d_pct_renter + pop_growth_cbsa | year,
+                       data = cbsa_fd, cluster = ~CBSAFP)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  #coef_omit   = "^(?!.*d_gini_inc|.*H_inc_lag_c)",
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  output      = "html"
+)
+```
+
+## Decomposition by Tenure
+
+The pooled Gini combines within-tenure inequality with the renter/owner cost gap. To understand which component drives the moderation result, we re-estimate the full model separately using `gini_rent_cbsa` (renters only) and `gini_val_cbsa` (owners only) as dependent variables. Because these measures are computed from directly observed values without any cap rate conversion, this also bypasses the imputed rent assumption entirely.
+
+Recall that the moderation hypothesis concerns how strongly a rise in income inequality translates into housing cost inequality given the level of segregation — segregation is the moderator, not the driver. With this in mind, we expect the moderation to be stronger for home values than for rents. When income inequality increases (especially at the top), in more segregated metros the gains of top earners flow into a narrow set of premium neighborhoods where high-income households are concentrated, bidding up values there. At the same time, Glaeser and Gyourko's (2005) supply asymmetry implies that low-income areas do not depreciate symmetrically — the durable housing stock decays slowly, creating a floor under low-end values. Together, concentrated appreciation at the top and sticky values at the bottom amplify how income inequality growth translates into value dispersion, more so in metros where income groups are spatially separated. The rental market absorbs the same income inequality increase more diffusely: renters are more mobile across neighbourhoods, lease contracts slow price adjustment, and the income–rent gradient is less steep to begin with.
+
+Note that null results here do not contradict the main finding: if the moderation operates primarily through the between-group channel — segregation widening the cost gap between renters and owners as groups — it would not appear in either tenure-specific Gini.
+
+```{r housing_ineq_decomp}
+modelsummary(
+  list(
+    "Rent"  = feols(gini_rent_cbsa ~ gini_inc_c * H_inc_c + H_bw +
+                      unemp_rate_cbsa + vacancy_rate_cbsa | year,
+                    data = cbsa, cluster = ~CBSAFP + year),
+    "Value" = feols(gini_val_cbsa  ~ gini_inc_c * H_inc_c + H_bw +
+                      unemp_rate_cbsa + vacancy_rate_cbsa | year,
+                    data = cbsa, cluster = ~CBSAFP + year)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = coef_names,
+  coef_omit   = "^(?!.*gini_inc_c|.*H_inc_c)",
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  output      = "html"
+)
+```
+
+### First-Differences Decomposition
+
+```{r housing_ineq_fd_decomp}
+modelsummary(
+  list(
+    "\u0394Rent (FD)"  = feols(d_gini_rent ~ d_gini_inc * H_inc_lag_c + d_H_bw +
+                                 d_unemp + d_vacancy | year,
+                               data = cbsa_fd, cluster = ~CBSAFP),
+    "\u0394Value (FD)" = feols(d_gini_val  ~ d_gini_inc * H_inc_lag_c + d_H_bw +
+                                 d_unemp + d_vacancy | year,
+                               data = cbsa_fd, cluster = ~CBSAFP)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  output      = "html"
+)
+```
+
+The FD results confirm the asymmetry: the interaction effect for home values is substantially larger than for rents and reaches marginal significance, while the rent interaction is small and insignificant. This is consistent with the theoretical expectation above. The FD estimator identifies changes within metros over time, so the value result specifically says that in metros where income segregation was higher at the start of a period, a given increase in income inequality over that period translated into a larger widening of home value dispersion. This dynamic pattern fits the capitalisation story: rising top incomes bid up values in the premium (segregated) neighbourhoods disproportionately, while value floors in low-income areas are held up by durable housing stock. Rents, by contrast, adjust more slowly and across a more diffuse set of neighbourhoods, dampening the within-metro, within-period translation.
+
 
 # Segregation Moderates Income → Housing Quality
 
@@ -293,9 +603,9 @@ The ABM predicts that income segregation acts as a moderator of the relationship
 
 > In more segregated cities, the effect of household income on housing quality is stronger (steeper slope).
 
-We test this with a linear probability model regressing within-group quality rank on log equivalised household income, the city-level rank-order income segregation index H^R, and their interaction. Year fixed effects absorb national time trends and metro area (CBSA) fixed effects deals with time-constant properties of the metros. Standard errors are clustered by CBSA. 
+We test this with a WLS regression of within-group quality rank on log equivalised household income, the city-level rank-order income segregation index $H^R$, and their interaction. Household weights (HHWT) are applied throughout. Standard errors are clustered by CBSA. Two-way clustering on CBSA and year is not used: with only four survey waves the year dimension has far too few clusters for reliable cluster-robust inference.
 
-The control strategy therefore needs to control for time-varying variables within metro areas (net of national trends) that could bias the relationships between metropolitan-level income segregation, the quality proxy, and household equivalized income. I add the following control variables:
+No fixed effects are included: `quality` is already z-standardised within `YEAR × CBSAFP × tenure`, which removes all cell means — a finer demeaning than any combination of additive year and CBSA FEs. The identifying variation is therefore already purely within-cell (between households in the same metro, year, and tenure group). Instead, we control directly for the following time-varying individual and metro-level confounders:
 
 - metro area income inequality (Gini index): 
 - metro area racial segregation (Theil index White vs. Black):
@@ -307,19 +617,14 @@ The control strategy therefore needs to control for time-varying variables withi
 
 
 ```{r quality_combined}
-## Individual controls: race/ethnicity, college degree, age
-## TODO household type: RELATE not saved in pums_hh.parquet — re-extract or derive
-## TODO city-level controls — run seg_indices_ACS.R to produce cbsa_controls.parquet,
-##   then update the read_parquet() call above and add to model formulas:
-##   + H_bw          Black-white segregation (binary Theil H, seg_indices_ACS.R)
-##   + gini_inc_cbsa      income inequality (weighted Gini, seg_indices_ACS.R)
-##   + vacancy_rate_cbsa  housing market tightness (seg_indices_ACS.R)
-##   + unemp_rate_cbsa    local unemployment rate (seg_indices_ACS.R)
-m1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE | YEAR + CBSAFP,
+m1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
             data = pums, weights = ~HHWT, cluster = "CBSAFP")
-m2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE | YEAR + CBSAFP,
+m2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
             data = pums, weights = ~HHWT, cluster = "CBSAFP")
-m3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE | YEAR + CBSAFP,
+m3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
             data = pums, weights = ~HHWT, cluster = "CBSAFP")
 
 modelsummary(
@@ -331,20 +636,69 @@ modelsummary(
 ```
 
 ```{r quality_combined_plot}
-pred_df <- make_pred(m3, pums) # requires prediction helpers that I removed: rewrite
+b    <- coef(m3)
+V    <- vcov(m3)
 
-ggplot(pred_df, aes(exp(log_equiv_inc), quality,
-                    color = seg_level, group = seg_level)) +
-  geom_ribbon(aes(ymin = q_lo, ymax = q_hi, fill = seg_level),
-              alpha = 0.15, color = NA) +
-  geom_line(linewidth = 1) +
-  scale_color_brewer(palette = "Set1", name = "Income Segregation (H^R)") +
-  scale_fill_brewer( palette = "Set1", name = "Income Segregation (H^R)") +
+age_mn   <- weighted.mean(pums$AGE,               pums$HHWT, na.rm = TRUE)
+gini_mn  <- weighted.mean(pums$gini_inc_cbsa,     pums$HHWT, na.rm = TRUE)
+Hbw_mn   <- weighted.mean(pums$H_bw,              pums$HHWT, na.rm = TRUE)
+unemp_mn <- weighted.mean(pums$unemp_rate_cbsa,   pums$HHWT, na.rm = TRUE)
+vac_mn   <- weighted.mean(pums$vacancy_rate_cbsa, pums$HHWT, na.rm = TRUE)
+h_mn     <- weighted.mean(pums$H_inc,             pums$HHWT, na.rm = TRUE)
+h_sd     <- sd(pums$H_inc, na.rm = TRUE)
+
+x_seq    <- seq(quantile(pums$log_equiv_inc, 0.01, na.rm = TRUE),
+                quantile(pums$log_equiv_inc, 0.99, na.rm = TRUE),
+                length.out = 100)
+h_levels <- h_mn + c(-h_sd, 0, h_sd)
+h_labels <- c("Low ($-$1 SD)", "Mean", "High ($+$1 SD)")
+
+newdata <- expand.grid(
+  log_equiv_inc     = x_seq,
+  H_inc             = h_levels,
+  race_eth          = factor("nhwhite", levels = levels(pums$race_eth)),
+  college           = 0,
+  AGE               = age_mn,
+  gini_inc_cbsa     = gini_mn,
+  H_bw              = Hbw_mn,
+  unemp_rate_cbsa   = unemp_mn,
+  vacancy_rate_cbsa = vac_mn
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
+
+X <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                    gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+                  data = newdata)[, names(b)]
+
+newdata <- newdata |>
+  mutate(
+    y_hat = as.numeric(X %*% b),
+    se    = sqrt(diag(X %*% V %*% t(X))),
+    ylo   = y_hat - 1.96 * se,
+    yhi   = y_hat + 1.96 * se
+  )
+
+ggplot(newdata, aes(x = exp(log_equiv_inc),
+                    colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
   scale_x_continuous(labels = scales::label_dollar()) +
-  labs(x = "Equivalised Household Income (1999 USD)",
-       y = "Predicted Housing Quality (z-score)") +
+  labs(
+    x = "Equivalised Household Income (1999 USD)",
+    y = "Housing Quality (predicted z-score)"
+  ) +
   theme_bw() +
   theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "quality_income_seg.pdf"), height = 12, width = 18, units = "cm")
 ```
 
 
@@ -353,19 +707,28 @@ ggplot(pred_df, aes(exp(log_equiv_inc), quality,
 The income–quality relationship may operate through different mechanisms for renters and owners. For renters, income determines which segment of the rental market a household can access. For owners, income determines purchasing power in the sales market, where neighbourhood sorting is reinforced by credit constraints and property tax capitalisation of local amenities. We therefore estimate the interaction model separately by tenure.
 
 ```{r quality_tenure}
-m_r1 <- feols(quality ~ log_equiv_inc         | YEAR, data = pums_renters,
-              weights = ~HHWT, cluster = "CBSAFP")
-m_r2 <- feols(quality ~ log_equiv_inc + H_inc | YEAR, data = pums_renters,
-              weights = ~HHWT, cluster = "CBSAFP")
-m_r3 <- feols(quality ~ log_equiv_inc * H_inc | YEAR, data = pums_renters,
-              weights = ~HHWT, cluster = "CBSAFP")
+pums_renters <- filter(pums, renter == 1L)
+pums_owners  <- filter(pums, renter == 0L)
 
-m_o1 <- feols(quality ~ log_equiv_inc         | YEAR, data = pums_owners,
-              weights = ~HHWT, cluster = "CBSAFP")
-m_o2 <- feols(quality ~ log_equiv_inc + H_inc | YEAR, data = pums_owners,
-              weights = ~HHWT, cluster = "CBSAFP")
-m_o3 <- feols(quality ~ log_equiv_inc * H_inc | YEAR, data = pums_owners,
-              weights = ~HHWT, cluster = "CBSAFP")
+m_r1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+              data = pums_renters, weights = ~HHWT, cluster = "CBSAFP")
+m_r2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+              data = pums_renters, weights = ~HHWT, cluster = "CBSAFP")
+m_r3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+              data = pums_renters, weights = ~HHWT, cluster = "CBSAFP")
+
+m_o1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+              data = pums_owners,  weights = ~HHWT, cluster = "CBSAFP")
+m_o2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+              data = pums_owners,  weights = ~HHWT, cluster = "CBSAFP")
+m_o3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+              data = pums_owners,  weights = ~HHWT, cluster = "CBSAFP")
 
 modelsummary(
   list("Renters (1)" = m_r1, "Renters (2)" = m_r2, "Renters (3)" = m_r3,
@@ -376,3 +739,290 @@ modelsummary(
 )
 ```
 
+# Segregation Moderates Income → Housing Cost Burden
+
+> In more segregated cities, the effect of household income on housing cost burden is weaker (softer slope).
+
+Because the outcome variables are not pre-standardised, year and CBSAFP fixed effects are included throughout. Although `H_inc` changes little within metros over the sample period, it does vary, and the cross-level interaction `log_equiv_inc × H_inc` remains identified with CBSAFP FE: the interaction coefficient captures how the within-household income slope on cost burden varies with metro-level segregation, using both cross-sectional and within-metro over-time variation. The main effect of `H_inc` is absorbed by the CBSAFP FE and not interpretable in models that include it. Standard errors are clustered by CBSAFP; two-way clustering on year is not used because only four survey waves are available.
+
+The control strategy mirrors the quality models: individual controls (race/ethnicity, college degree, age and age squared) and time-varying metro-level controls (income inequality Gini, Black-White segregation H, unemployment rate, vacancy rate).
+
+## Renters
+
+The renter outcome is the annual rent-to-income ratio `rent_to_inc` = (RENTGRS × 12) / HHINCOME. RENTGRS is monthly gross rent; multiplying by 12 annualises it to match HHINCOME (annual). The CPI deflator cancels.
+
+```{r burden_models}
+pums_renters_b <- filter(pums, !is.na(rent_to_inc))
+
+b1 <- feols(rent_to_inc ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_renters_b, weights = ~HHWT, cluster = "CBSAFP")
+b2 <- feols(rent_to_inc ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_renters_b, weights = ~HHWT, cluster = "CBSAFP")
+b3 <- feols(rent_to_inc ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_renters_b, weights = ~HHWT, cluster = "CBSAFP")
+
+modelsummary(
+  list("(1)" = b1, "(2)" = b2, "(3)" = b3),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: YEAR", "FE: CBSAFP"),
+  output      = "html"
+)
+```
+
+```{r burden_plot}
+b_coef <- coef(b3)
+b_vcov <- vcov(b3)
+
+age_mn   <- weighted.mean(pums_renters_b$AGE,               pums_renters_b$HHWT, na.rm = TRUE)
+gini_mn  <- weighted.mean(pums_renters_b$gini_inc_cbsa,     pums_renters_b$HHWT, na.rm = TRUE)
+Hbw_mn   <- weighted.mean(pums_renters_b$H_bw,              pums_renters_b$HHWT, na.rm = TRUE)
+unemp_mn <- weighted.mean(pums_renters_b$unemp_rate_cbsa,   pums_renters_b$HHWT, na.rm = TRUE)
+vac_mn   <- weighted.mean(pums_renters_b$vacancy_rate_cbsa, pums_renters_b$HHWT, na.rm = TRUE)
+h_mn     <- weighted.mean(pums_renters_b$H_inc,             pums_renters_b$HHWT, na.rm = TRUE)
+h_sd     <- sd(pums_renters_b$H_inc, na.rm = TRUE)
+
+x_seq    <- seq(quantile(pums_renters_b$log_equiv_inc, 0.01, na.rm = TRUE),
+                quantile(pums_renters_b$log_equiv_inc, 0.99, na.rm = TRUE),
+                length.out = 100)
+h_levels <- h_mn + c(-h_sd, 0, h_sd)
+h_labels <- c("Low ($-$1 SD)", "Mean", "High ($+$1 SD)")
+
+newdata_b <- expand.grid(
+  log_equiv_inc     = x_seq,
+  H_inc             = h_levels,
+  race_eth          = factor("nhwhite", levels = levels(pums$race_eth)),
+  college           = 0,
+  AGE               = age_mn,
+  gini_inc_cbsa     = gini_mn,
+  H_bw              = Hbw_mn,
+  unemp_rate_cbsa   = unemp_mn,
+  vacancy_rate_cbsa = vac_mn
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
+
+# Year FE absorbed (predictions at the average year effect, i.e. FE = 0)
+X_b <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                      gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+                    data = newdata_b)[, names(b_coef)]
+
+newdata_b <- newdata_b |>
+  mutate(
+    y_hat = as.numeric(X_b %*% b_coef),
+    se    = sqrt(diag(X_b %*% b_vcov %*% t(X_b))),
+    ylo   = y_hat - 1.96 * se,
+    yhi   = y_hat + 1.96 * se
+  )
+
+ggplot(newdata_b, aes(x = exp(log_equiv_inc),
+                      colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(
+    x = "Equivalised Household Income (1999 USD)",
+    y = "Rent-to-Income Ratio (predicted)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "burden_income_seg.pdf"), height = 12, width = 18, units = "cm")
+```
+
+## Owners
+
+For owners two cost proxies are available. The value-to-income ratio (`val_to_inc` = `valueh_real / hhincome_real`) is a stock/flow measure directly available from the PUMS. The imputed cost-to-income ratio (`cost_to_inc` = `valueh_real × cap_rate_metro / hhincome_real`) converts the property value to an annualised flow cost using the metro × year cap rate, giving a flow/flow ratio directly comparable to the renter measure. Both are deflator-invariant.
+
+### Value-to-Income Ratio
+
+```{r burden_val_models}
+pums_owners_v <- filter(pums, !is.na(val_to_inc))
+
+v1 <- feols(val_to_inc ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_owners_v, weights = ~HHWT, cluster = "CBSAFP")
+v2 <- feols(val_to_inc ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_owners_v, weights = ~HHWT, cluster = "CBSAFP")
+v3 <- feols(val_to_inc ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_owners_v, weights = ~HHWT, cluster = "CBSAFP")
+
+modelsummary(
+  list("(1)" = v1, "(2)" = v2, "(3)" = v3),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: YEAR", "FE: CBSAFP"),
+  output      = "html"
+)
+```
+
+```{r burden_val_plot}
+v_coef <- coef(v3)
+v_vcov <- vcov(v3)
+
+age_mn   <- weighted.mean(pums_owners_v$AGE,               pums_owners_v$HHWT, na.rm = TRUE)
+gini_mn  <- weighted.mean(pums_owners_v$gini_inc_cbsa,     pums_owners_v$HHWT, na.rm = TRUE)
+Hbw_mn   <- weighted.mean(pums_owners_v$H_bw,              pums_owners_v$HHWT, na.rm = TRUE)
+unemp_mn <- weighted.mean(pums_owners_v$unemp_rate_cbsa,   pums_owners_v$HHWT, na.rm = TRUE)
+vac_mn   <- weighted.mean(pums_owners_v$vacancy_rate_cbsa, pums_owners_v$HHWT, na.rm = TRUE)
+h_mn     <- weighted.mean(pums_owners_v$H_inc,             pums_owners_v$HHWT, na.rm = TRUE)
+h_sd     <- sd(pums_owners_v$H_inc, na.rm = TRUE)
+
+x_seq    <- seq(quantile(pums_owners_v$log_equiv_inc, 0.01, na.rm = TRUE),
+                quantile(pums_owners_v$log_equiv_inc, 0.99, na.rm = TRUE),
+                length.out = 100)
+h_levels <- h_mn + c(-h_sd, 0, h_sd)
+h_labels <- c("Low ($-$1 SD)", "Mean", "High ($+$1 SD)")
+
+newdata_v <- expand.grid(
+  log_equiv_inc     = x_seq,
+  H_inc             = h_levels,
+  race_eth          = factor("nhwhite", levels = levels(pums$race_eth)),
+  college           = 0,
+  AGE               = age_mn,
+  gini_inc_cbsa     = gini_mn,
+  H_bw              = Hbw_mn,
+  unemp_rate_cbsa   = unemp_mn,
+  vacancy_rate_cbsa = vac_mn
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
+
+X_v <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                      gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+                    data = newdata_v)[, names(v_coef)]
+
+newdata_v <- newdata_v |>
+  mutate(
+    y_hat = as.numeric(X_v %*% v_coef),
+    se    = sqrt(diag(X_v %*% v_vcov %*% t(X_v))),
+    ylo   = y_hat - 1.96 * se,
+    yhi   = y_hat + 1.96 * se
+  )
+
+ggplot(newdata_v, aes(x = exp(log_equiv_inc),
+                      colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(
+    x = "Equivalised Household Income (1999 USD)",
+    y = "Value-to-Income Ratio (predicted)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "burden_val_income_seg.pdf"), height = 12, width = 18, units = "cm")
+```
+
+### Imputed Cost-to-Income Ratio
+
+```{r burden_cost_models}
+pums_owners_c <- filter(pums, !is.na(cost_to_inc))
+
+c1 <- feols(cost_to_inc ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_owners_c, weights = ~HHWT, cluster = "CBSAFP")
+c2 <- feols(cost_to_inc ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_owners_c, weights = ~HHWT, cluster = "CBSAFP")
+c3 <- feols(cost_to_inc ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa | YEAR + CBSAFP,
+            data = pums_owners_c, weights = ~HHWT, cluster = "CBSAFP")
+
+modelsummary(
+  list("(1)" = c1, "(2)" = c2, "(3)" = c3),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: YEAR", "FE: CBSAFP"),
+  output      = "html"
+)
+```
+
+```{r burden_cost_plot}
+c_coef <- coef(c3)
+c_vcov <- vcov(c3)
+
+age_mn   <- weighted.mean(pums_owners_c$AGE,               pums_owners_c$HHWT, na.rm = TRUE)
+gini_mn  <- weighted.mean(pums_owners_c$gini_inc_cbsa,     pums_owners_c$HHWT, na.rm = TRUE)
+Hbw_mn   <- weighted.mean(pums_owners_c$H_bw,              pums_owners_c$HHWT, na.rm = TRUE)
+unemp_mn <- weighted.mean(pums_owners_c$unemp_rate_cbsa,   pums_owners_c$HHWT, na.rm = TRUE)
+vac_mn   <- weighted.mean(pums_owners_c$vacancy_rate_cbsa, pums_owners_c$HHWT, na.rm = TRUE)
+h_mn     <- weighted.mean(pums_owners_c$H_inc,             pums_owners_c$HHWT, na.rm = TRUE)
+h_sd     <- sd(pums_owners_c$H_inc, na.rm = TRUE)
+
+x_seq    <- seq(quantile(pums_owners_c$log_equiv_inc, 0.01, na.rm = TRUE),
+                quantile(pums_owners_c$log_equiv_inc, 0.99, na.rm = TRUE),
+                length.out = 100)
+h_levels <- h_mn + c(-h_sd, 0, h_sd)
+h_labels <- c("Low ($-$1 SD)", "Mean", "High ($+$1 SD)")
+
+newdata_c <- expand.grid(
+  log_equiv_inc     = x_seq,
+  H_inc             = h_levels,
+  race_eth          = factor("nhwhite", levels = levels(pums$race_eth)),
+  college           = 0,
+  AGE               = age_mn,
+  gini_inc_cbsa     = gini_mn,
+  H_bw              = Hbw_mn,
+  unemp_rate_cbsa   = unemp_mn,
+  vacancy_rate_cbsa = vac_mn
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
+
+X_c <- model.matrix(~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                      gini_inc_cbsa + H_bw + unemp_rate_cbsa + vacancy_rate_cbsa,
+                    data = newdata_c)[, names(c_coef)]
+
+newdata_c <- newdata_c |>
+  mutate(
+    y_hat = as.numeric(X_c %*% c_coef),
+    se    = sqrt(diag(X_c %*% c_vcov %*% t(X_c))),
+    ylo   = y_hat - 1.96 * se,
+    yhi   = y_hat + 1.96 * se
+  )
+
+ggplot(newdata_c, aes(x = exp(log_equiv_inc),
+                      colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(
+    x = "Equivalised Household Income (1999 USD)",
+    y = "Imputed Cost-to-Income Ratio (predicted)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "burden_cost_income_seg.pdf"), height = 12, width = 18, units = "cm")
+```

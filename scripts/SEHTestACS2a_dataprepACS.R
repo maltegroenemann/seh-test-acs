@@ -359,7 +359,9 @@ county_cbsa <- counties(year = 2020) |>
 
 cbsa_names <- core_based_statistical_areas(year = 2020) |>
   as_tibble() |>
-  select(CBSAFP = GEOID, CBSA_name = NAME)
+  select(CBSAFP = GEOID, CBSA_name = NAME) |>
+  mutate(cbsa_name_short = sub("^([^-/]+?)(?:[-/][^,]*)?,\\s*([A-Z]{2}).*$",
+                                "\\1, \\2", CBSA_name))
 
 acs_raw <- acs_raw |>
   mutate(county_fips = substr(sub("^.*US", "", GEOID), 1, 5)) |>
