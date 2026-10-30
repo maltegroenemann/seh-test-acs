@@ -1,0 +1,235 @@
+---
+title: "A Socio-Economic Model of Residential Segregation, Neighborhood Change and Housing Inequality"
+subtitle: "Empirical Analysis: H4 — Segregation Moderates Income → Housing Quality"
+author: "Malte Grönemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error   = FALSE,
+                      out.width = "100%")
+
+# Packages
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(fixest)
+library(modelsummary)
+library(latex2exp)
+library(kableExtra)
+
+# Plotting
+cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
+shapes <- c(0, 1, 2, 5, 6)
+
+# File Paths
+# TODO for replication: change paths
+# local paths for development
+#data_dir <- "~/Projects/SEHTestACS/data/"
+#results_dir <- "../results/"
+# paths at HELIX HPC
+data_dir <- "./data/"
+results_dir <- "./results/"
+
+# Data
+pums <- read_parquet(paste0(data_dir, "pums_analysis.parquet")) |>
+  mutate(year = as.integer(YEAR),
+         # race_eth: nhwhite as reference category
+         race_eth = factor(race_eth, levels = c("nhwhite", "nhblack", "hispanic", "nhother"))
+         )
+
+acs <- read_parquet(paste0(data_dir, "acs_metro.parquet"))
+
+metro_vars <- read_parquet(paste0(data_dir, "metro_vars.parquet"))
+```
+
+
+# Segregation Moderates Income → Housing Quality
+
+The ABM predicts that income segregation acts as a moderator of the relationship between household income and housing quality. In more segregated cities, neighbourhoods are more polarised in their attractiveness and housing quality. High-income households cluster in high-quality areas while low-income households are confined to low-quality ones, steepening the income–quality gradient. The cross-level interaction hypothesis is:
+
+> In more segregated cities, the effect of household income on housing quality is stronger (steeper slope).
+
+We test this with a WLS regression of within-group quality rank on log equivalised household income, the city-level rank-order income segregation index $H^R$, and their interaction. Household weights (HHWT) are applied throughout. Standard errors are clustered by CBSA. Two-way clustering on CBSA and year is not used: with only four survey waves the year dimension has far too few clusters for reliable cluster-robust inference.
+
+No fixed effects are included: `quality` is already z-standardised within `year × metro_area × tenure`, which removes all cell means — a finer demeaning than any combination of additive year and CBSA FEs. The identifying variation is therefore already purely within-cell (between households in the same metro, year, and tenure group). Instead, we control directly for the following time-varying individual and metro-level confounders:
+
+- metro area income inequality (Gini index):
+- metro area racial segregation (Theil index White vs. Black):
+- metro area unemployment rate:
+- metro area vacancy rate:
+- individual race/ethnicity:
+- individual education (college):
+- individual age and age squared:
+
+
+```{r quality_combined}
+m1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) + # TODO log quality?
+              gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+            data = pums, weights = ~HHWT, cluster = "metro_area")
+m2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+            data = pums, weights = ~HHWT, cluster = "metro_area")
+m3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+            data = pums, weights = ~HHWT, cluster = "metro_area")
+
+modelsummary(
+  list("(1)" = m1, "(2)" = m2, "(3)" = m3),
+  stars   = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map = c("nobs", "r.squared"),
+  output  = "html"
+)
+```
+
+```{r quality_combined_plot}
+b    <- coef(m3)
+V    <- vcov(m3)
+
+age_mn   <- weighted.mean(pums$AGE,               pums$HHWT, na.rm = TRUE)
+gini_mn  <- weighted.mean(pums$gini_inc_metro,     pums$HHWT, na.rm = TRUE)
+Hbw_mn   <- weighted.mean(pums$H_bw,              pums$HHWT, na.rm = TRUE)
+unemp_mn <- weighted.mean(pums$unemp_rate_metro,   pums$HHWT, na.rm = TRUE)
+vac_mn   <- weighted.mean(pums$vacancy_rate_metro, pums$HHWT, na.rm = TRUE)
+h_mn     <- weighted.mean(pums$H_inc,             pums$HHWT, na.rm = TRUE)
+h_sd     <- sd(pums$H_inc, na.rm = TRUE)
+
+x_seq    <- seq(quantile(pums$log_equiv_inc, 0.05, na.rm = TRUE),
+                quantile(pums$log_equiv_inc, 0.95, na.rm = TRUE),
+                length.out = 100)
+h_levels <- h_mn + c(-h_sd, 0, h_sd)
+h_labels <- sprintf(c("Low ($-$1 SD, $H^R = %.3f$)",
+                       "Mean ($H^R = %.3f$)",
+                       "High ($+$1 SD, $H^R = %.3f$)"),
+                    h_levels)
+
+newdata <- expand.grid(
+  log_equiv_inc     = x_seq,
+  H_inc             = h_levels,
+  race_eth          = factor("nhwhite", levels = levels(pums$race_eth)),
+  college           = 0,
+  AGE               = age_mn,
+  gini_inc_metro     = gini_mn,
+  H_bw              = Hbw_mn,
+  unemp_rate_metro   = unemp_mn,
+  vacancy_rate_metro = vac_mn
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
+
+V_key <- V[c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc"),
+            c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc")]
+
+newdata <- newdata |>
+  mutate(
+    y_hat = predict(m3, newdata = newdata),
+    se    = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_key %*% z))
+            }, log_equiv_inc, H_inc),
+    ylo   = y_hat - 1.96 * se,
+    yhi   = y_hat + 1.96 * se
+  )
+
+ggplot(newdata, aes(x = exp(log_equiv_inc),
+                    colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(
+    x = "Equivalised Household Income (1999 USD)",
+    y = "Housing Quality (predicted z-score)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "quality_income_seg.pdf"), height = 12, width = 18, units = "cm")
+```
+
+
+## By Tenure
+
+The income–quality relationship may operate through different mechanisms for renters and owners. For renters, income determines which segment of the rental market a household can access. For owners, income determines purchasing power in the sales market, where neighbourhood sorting is reinforced by credit constraints and property tax capitalisation of local amenities. We therefore estimate the interaction model separately by tenure.
+
+```{r quality_tenure}
+pums_renters <- filter(pums, renter == 1L)
+pums_owners  <- filter(pums, renter == 0L)
+
+m_r1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_renters, weights = ~HHWT, cluster = "metro_area")
+m_r2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_renters, weights = ~HHWT, cluster = "metro_area")
+m_r3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_renters, weights = ~HHWT, cluster = "metro_area")
+
+m_o1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_owners,  weights = ~HHWT, cluster = "metro_area")
+m_o2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_owners,  weights = ~HHWT, cluster = "metro_area")
+m_o3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_owners,  weights = ~HHWT, cluster = "metro_area")
+
+dv_row_tenure <- data.frame(rbind(c(
+  "Dependent Variable",
+  "Quality (Renters)", "Quality (Renters)", "Quality (Renters)",
+  "Quality (Owners)",  "Quality (Owners)",  "Quality (Owners)"
+)))
+attr(dv_row_tenure, "position") <- 1
+
+modelsummary(
+  list("(1)" = m_r1, "(2)" = m_r2, "(3)" = m_r3,
+       "(4)" = m_o1, "(5)" = m_o2, "(6)" = m_o3),
+  add_rows = dv_row_tenure,
+  stars    = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = c("nobs", "r.squared"),
+  output   = "html"
+)
+```
+
+## Robustness: Value and Rent Segregation as Alternative Moderators
+
+We replicate the pooled interaction model (m3) replacing $H^R_\text{inc}$ with $H^R_\text{val}$ ($r = 0.77$) and $H^R_\text{rent}$ ($r = 0.47$) as the moderator.
+
+The caveats from the city-level section apply with particular force here. Housing quality is operationalised as a within-context rank of *rent* (renters) or *home value* (owners). Using $H^R_\text{rent}$ or $H^R_\text{val}$ as the moderator therefore creates a near-tautological relationship: metros with higher $H^R_\text{val}$ have by construction a steeper home-value gradient across neighbourhoods, which mechanically steepens the income–quality slope for owners; the same logic applies to $H^R_\text{rent}$ for renters. The result for these measures should be read as descriptive confirmation rather than an independent test of the moderation hypothesis. Income segregation is not derived from the quality outcome and remains the preferred moderator in the main specification.
+
+```{r quality_robseg}
+modelsummary(
+  list(
+    "(1)" = m3,
+    "(2)" = feols(quality ~ log_equiv_inc * H_val  + race_eth + college + AGE + I(AGE^2) +
+                    gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+                  data = pums, weights = ~HHWT, cluster = "metro_area"),
+    "(3)" = feols(quality ~ log_equiv_inc * H_rent + race_eth + college + AGE + I(AGE^2) +
+                    gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+                  data = pums, weights = ~HHWT, cluster = "metro_area")
+  ),
+  stars   = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map = c("nobs", "r.squared"),
+  output  = "html"
+)
+```
+
+# References

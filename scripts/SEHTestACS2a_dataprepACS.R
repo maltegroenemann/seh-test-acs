@@ -22,9 +22,10 @@
 #   B19013  Median household income
 #   B25002  Occupancy status                    → vacancy rate
 #   B25003  Tenure                              → pct_renter
-#   B25063  Gross rent dollar brackets          → H^R rent segregation
-#   B25064  Median gross rent
-#   B25070  Gross rent as % of income           → rent burden
+#   B25056  Contract rent dollar brackets       → H^R rent segregation
+#           (contract rent excl. utilities; consistent with PUMS quality proxy RENT)
+#   B25058  Median contract rent
+#   B25070  Gross rent as % of income           → rent burden (gross rent correct here)
 #   B25075  Home value dollar brackets          → H^R home-value segregation
 #   B25077  Median home value
 
@@ -39,9 +40,10 @@ if (!requireNamespace("ipumsr", quietly = TRUE) ||
 
 library(ipumsr)
 library(tigris)
-library(nanoparquet)
+library(arrow)
 library(dplyr)
 
+# TODO for replication: change paths
 data_dir    <- "./data/ACS/"
 output_dir <- "./data/"
 zip_path    <- list.files(data_dir, pattern = "nhgis.*csv.*\\.zip$", full.names = TRUE)
@@ -71,10 +73,11 @@ folder_name <- sub("_csv\\.zip$", "", basename(zip_path))
 #   units_vac    B25002 E003
 #   own          B25003 E002
 #   rent         B25003 E003
-#   rent_01–21   B25063 E003–E023 [2009, 2014; top = "$2,000 or more"]
-#   rent_01–24   B25063 E003–E026 [2019, 2024; top = "$3,500 or more"]
+#   rent_01–21   B25056 E003–E023 [2009, 2014; top = "$2,000 or more"]
+#   rent_01–24   B25056 E003–E026 [2019, 2024; top = "$3,500 or more"]
 #                (trailing brackets NA-padded to 24 columns after bind_rows)
-#   median_rent  B25064 E001
+#                Contract rent excludes utilities; lower thresholds than B25063.
+#   median_rent  B25058 E001  (median contract rent)
 #   rb_tot       B25070 E001 (rent burden denominator)
 #   rb_30_35     B25070 E007
 #   rb_35_40     B25070 E008
@@ -102,16 +105,16 @@ read_and_rename <- function(zip, ACS5a_file, ACS5b_file, year,
                             own_nhw, rent_nhw,       # B25003H E002, E003
                             own_nhb, rent_nhb,       # B25003B E002, E003
                             own_his, rent_his,       # B25003I E002, E003
-                            rent_prefix, rent_E_end, # B25063: prefix + last E-number (incl. "no cash rent")
-                            median_rent,
+                            rent_prefix, rent_E_end, # B25056: prefix + last E-number (incl. "no cash rent")
+                            median_rent,             # B25058 E001
                             rb_tot, rb_07, rb_08, rb_09, rb_10,
                             val_prefix, val_E_end,   # B25075: prefix + last E-number
                             median_val,
                             edu_tot = NULL, edu_22 = NULL,
                             edu_23 = NULL, edu_24 = NULL, edu_25 = NULL) {
-  # B25063 bracket counts differ by vintage:
-  #   2009, 2014: E003–E023 (21 cash-rent brackets; rent_E_end = 24, i.e. E024 = "no cash rent")
-  #   2019, 2024: E003–E026 (24 cash-rent brackets; rent_E_end = 27, i.e. E027 = "no cash rent")
+  # B25056 bracket counts differ by vintage (contract rent; verify from new NHGIS extract):
+  #   bracket thresholds are lower than B25063 (gross rent) since utilities are excluded.
+  #   rent_E_end = last E-number in the table (= "no cash rent" row, excluded from H^R).
   # B25075 bracket counts differ by vintage:
   #   2009, 2014: E002–E025 (24 value brackets; val_E_end = 25)
   #   2019, 2024: E002–E027 (26 value brackets; val_E_end = 27)
@@ -248,8 +251,8 @@ data_2009 <- read_and_rename(
   own_nhw = "RQHE002", rent_nhw = "RQHE003",
   own_nhb = "RQBE002", rent_nhb = "RQBE003",
   own_his = "RQIE002", rent_his = "RQIE003",
-  rent_prefix = "RRT", rent_E_end = 24L, # B25063: 21 cash-rent brackets (E003–E023)
-  median_rent = "RRUE001",
+  rent_prefix = "RRM", rent_E_end = 24L, # B25056: 21 cash-rent brackets (E003–E023), E024 = no cash rent
+  median_rent = "RROE001",  # B25058
   rb_tot = "RR0E001", rb_07 = "RR0E007", rb_08 = "RR0E008",
   rb_09 = "RR0E009", rb_10 = "RR0E010",
   val_prefix = "RR5", val_E_end = 25L,   # B25075: 24 value brackets (E002–E025)
@@ -274,8 +277,8 @@ data_2014 <- read_and_rename(
   own_nhw = "ABG5E002", rent_nhw = "ABG5E003",
   own_nhb = "ABGZE002", rent_nhb = "ABGZE003",
   own_his = "ABG6E002", rent_his = "ABG6E003",
-  rent_prefix = "ABIG", rent_E_end = 24L, # B25063: 21 cash-rent brackets (E003–E023)
-  median_rent = "ABIHE001",
+  rent_prefix = "ABH9", rent_E_end = 24L, # B25056: 21 cash-rent brackets (E003–E023), E024 = no cash rent
+  median_rent = "ABIBE001",               # B25058
   rb_tot = "ABINE001", rb_07 = "ABINE007", rb_08 = "ABINE008",
   rb_09 = "ABINE009", rb_10 = "ABINE010",
   val_prefix = "ABIR", val_E_end = 25L,  # B25075: 24 value brackets (E002–E025)
@@ -301,8 +304,8 @@ data_2019 <- read_and_rename(
   own_nhw = "ALZTE002", rent_nhw = "ALZTE003",
   own_nhb = "ALZNE002", rent_nhb = "ALZNE003",
   own_his = "ALZUE002", rent_his = "ALZUE003",
-  rent_prefix = "AL04", rent_E_end = 27L, # B25063: 24 cash-rent brackets (E003–E026)
-  median_rent = "AL05E001",
+  rent_prefix = "AL0X", rent_E_end = 27L, # B25056: 24 cash-rent brackets (E003–E026), E027 = no cash rent
+  median_rent = "AL0ZE001",               # B25058
   rb_tot = "AL1BE001", rb_07 = "AL1BE007", rb_08 = "AL1BE008",
   rb_09 = "AL1BE009", rb_10 = "AL1BE010",
   val_prefix = "AL1F", val_E_end = 27L,  # B25075: 26 value brackets (E002–E027)
@@ -328,8 +331,8 @@ data_2024 <- read_and_rename(
   own_nhw = "AUUME002", rent_nhw = "AUUME003",
   own_nhb = "AUUGE002", rent_nhb = "AUUGE003",
   own_his = "AUUNE002", rent_his = "AUUNE003",
-  rent_prefix = "AUWF", rent_E_end = 27L, # B25063: 24 cash-rent brackets (E003–E026)
-  median_rent = "AUWGE001",
+  rent_prefix = "AUV8", rent_E_end = 27L, # B25056: 24 cash-rent brackets (E003–E026), E027 = no cash rent
+  median_rent = "AUWAE001",               # B25058
   rb_tot = "AUWME001", rb_07 = "AUWME007", rb_08 = "AUWME008",
   rb_09 = "AUWME009", rb_10 = "AUWME010",
   val_prefix = "AUWQ", val_E_end = 27L,  # B25075: 26 value brackets (E002–E027)
@@ -343,49 +346,58 @@ acs_raw <- bind_rows(data_2009, data_2014, data_2019, data_2024)
 rm(data_2009, data_2014, data_2019, data_2024)
 
 
-## ── 2. TOP 100 CBSAs ─────────────────────────────────────────────────────────
+## ── 2. METRO AREA SELECTION ───────────────────────────────────────────────────
 # NHGIS does not populate the CBSAA context column in tract CSV extracts.
 # I construct county FIPS by stripping the NHGIS GEOID prefix (which varies
 # by vintage: "14000US" for 2010-era, "1400000US" for 2020-era tracts) and
 # taking the first 5 characters of the remaining 11-digit FIPS. Then join
 # the 2020 county-to-CBSA crosswalk from TIGER/Line via tigris.
 # A single fixed boundary definition (2020) is used for all four waves.
-# Alaska, Hawaii, and Puerto Rico are excluded; the CBSAs are ranked by 
-# 2024 population within the contiguous US and the top 100 are kept for analysis.
+# Alaska, Hawaii, and Puerto Rico are excluded; CBSAs with a 2024 population
+# of at least 100,000 in the contiguous US are retained. This covers all
+# substantial urban areas while excluding micropolitan and rural CBSAs.
+# The analysis scripts may further restrict the sample as needed.
 
-county_cbsa <- counties(year = 2020) |>
+county_cbsa <- counties(year = 2020, cb = FALSE) |>
   as_tibble() |>
-  select(county_fips = GEOID, CBSAFP)
+  select(county_fips = GEOID, metro_area = CBSAFP)
 
 cbsa_names <- core_based_statistical_areas(year = 2020) |>
   as_tibble() |>
-  select(CBSAFP = GEOID, CBSA_name = NAME) |>
-  mutate(cbsa_name_short = sub("^([^-/]+?)(?:[-/][^,]*)?,\\s*([A-Z]{2}).*$",
-                                "\\1, \\2", CBSA_name))
+  select(metro_area = GEOID, metro_name = NAME) |>
+  mutate(metro_name_short = sub("^([^-/]+?)(?:[-/][^,]*)?,\\s*([A-Z]{2}).*$",
+                                "\\1, \\2", metro_name))
 
 acs_raw <- acs_raw |>
   mutate(county_fips = substr(sub("^.*US", "", GEOID), 1, 5)) |>
-  left_join(county_cbsa, by = "county_fips")
+  left_join(county_cbsa, by = "county_fips") |>
+  mutate(metro_area = na_if(metro_area, ""))
 
-# Rank CBSAs by 2024 population and keep top 100 in the contiguous US.
-# Tracts outside any CBSA (rural) have CBSAFP == NA; excluded here.
-top100_cbsa <- acs_raw |>
-  filter(year == 2024, !is.na(CBSAFP), !STUSAB %in% c("AK", "HI", "PR")) |>
-  group_by(CBSAFP) |>
+# Keep CBSAs with 2024 population >= 100,000 in the contiguous US.
+# Tracts outside any CBSA (rural) have metro_area == NA; excluded here.
+metro_cbsas <- acs_raw |>
+  filter(year == 2024, !is.na(metro_area), !STUSAB %in% c("AK", "HI", "PR")) |>
+  group_by(metro_area) |>
   summarise(pop_2024 = sum(pop, na.rm = TRUE), .groups = "drop") |>
-  slice_max(pop_2024, n = 100) |>
-  pull(CBSAFP)
+  filter(pop_2024 >= 100000) |>
+  pull(metro_area)
 
 acs <- acs_raw |>
-  filter(CBSAFP %in% top100_cbsa) |>
-  left_join(cbsa_names, by = "CBSAFP")
-rm(acs_raw, county_cbsa, cbsa_names, top100_cbsa)
+  filter(metro_area %in% metro_cbsas) |>
+  left_join(cbsa_names, by = "metro_area")
+rm(acs_raw, county_cbsa, cbsa_names, metro_cbsas)
 gc()
 
 
 ## ── 3. SAVE ──────────────────────────────────────────────────────────────────
 
 acs <- acs |>
-  mutate(vac_rate = units_vac / units_tot)
+  mutate(
+    vac_rate     = units_vac / units_tot,
+    log_median_inc = log(ifelse(median_inc > 0, median_inc, NA_real_)),
+    pct_renter   = rent / (own + rent),
+    pct_nhblack  = nhblack   / nhwhite_tot,
+    pct_hispanic = nhispanic / nhwhite_tot
+  )
 
-write_parquet(acs, file.path(output_dir, "acs_top100.parquet"))
+write_parquet(acs, file.path(output_dir, "acs_metro.parquet"))

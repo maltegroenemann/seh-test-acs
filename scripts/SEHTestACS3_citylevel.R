@@ -12,11 +12,11 @@
 # predictors in the PUMS individual-level analyses.
 #
 # Inputs:
-#   acs_top100.parquet  (produced by SEHTestACS2a_dataprepACS.R)  — tract-level ACS aggregates
+#   acs_metro.parquet  (produced by SEHTestACS2a_dataprepACS.R)  — tract-level ACS aggregates
 #   pums_hh.parquet     (produced by SEHTestACS2b_dataprepPUMS.R) — household-level PUMS
 #
 # Variables computed:
-#   From ACS tract data (acs_top100.parquet):
+#   From ACS tract data (acs_metro.parquet):
 #   H_inc             rank-order income segregation H^R (Reardon & Bischoff 2011; all HH)
 #   H_inc_p50         binary Theil H at median income cutpoint (below vs. above median HH income)
 #   H_inc_nhw         within-NH-White rank-order income segregation H^R (B19001H)
@@ -27,59 +27,69 @@
 #   H_inc_his_p50     Hispanic binary H at within-group median income cutpoint
 #   H_inc_within      within-race H^R (pop.-weighted avg. of H_inc_nhw/nhb/his)
 #   H_inc_between     between-race H^R (H_inc − H_inc_within; residual)
-#   pct_owner_nhw_cbsa NH-White homeownership rate (B25003H)
-#   pct_owner_nhb_cbsa NH-Black homeownership rate (B25003B)
-#   pct_owner_his_cbsa Hispanic homeownership rate (B25003I)
-#   owner_gap_bw_cbsa  NH-White minus NH-Black homeownership rate gap
-#   owner_gap_hw_cbsa  NH-White minus Hispanic homeownership rate gap
+#   pct_owner_nhw_metro NH-White homeownership rate (B25003H)
+#   pct_owner_nhb_metro NH-Black homeownership rate (B25003B)
+#   pct_owner_his_metro Hispanic homeownership rate (B25003I)
+#   owner_gap_bw_metro  NH-White minus NH-Black homeownership rate gap
+#   owner_gap_hw_metro  NH-White minus Hispanic homeownership rate gap
 #   H_tenure_nhw      NH-White owner vs. NH-White renter binary Theil H (B25003H)
 #   H_tenure_nhb      NH-Black owner vs. NH-Black renter binary Theil H (B25003B)
 #   H_tenure_his      Hispanic owner vs. Hispanic renter binary Theil H (B25003I)
 #   H_bw              NH-Black vs. NH-White binary Theil H
 #   H_tenure          owner vs. renter binary Theil H (tenure segregation)
 #   H_race_multi      four-group racial Theil H (NH White / NH Black / Hispanic / NH Other)
-#   H_rent            rank-order gross rent segregation H^R (B25063 cash-rent brackets)
+#   H_rent            rank-order contract rent segregation H^R (B25056 cash-rent brackets)
 #   H_val             rank-order home-value segregation H^R (B25075 value brackets)
-#   pop_cbsa          total CBSA population
-#   pop_growth_cbsa   period-over-period population growth rate (NA for 2009 due to lag)
-#   pct_renter_cbsa   renter share of occupied units (B25003)
-#   pct_nhwhite_cbsa  NH-White share of population (B03002)
-#   pct_nhblack_cbsa  NH-Black share of population (B03002)
-#   pct_hispanic_cbsa Hispanic share of population (B03002)
-#   pct_college_cbsa  share of population 25+ with BA or higher (B15003; NA for 2009)
-#   rent_burden_cbsa  share of renters paying ≥ 30 % of income on rent (B25070)
+#   pop_metro          total CBSA population
+#   pop_growth_metro   period-over-period population growth rate (NA for 2009 due to lag)
+#   pct_renter_metro   renter share of occupied units (B25003)
+#   pct_nhwhite_metro  NH-White share of population (B03002)
+#   pct_nhblack_metro  NH-Black share of population (B03002)
+#   pct_hispanic_metro Hispanic share of population (B03002)
+#   pct_college_metro  share of population 25+ with BA or higher (B15003; NA for 2009)
+#   rent_burden_metro  share of renters paying ≥ 30 % of income on rent (B25070)
 #   H_vac             binary Theil H: vacant vs. occupied units (B25002)
-#   vacancy_rate_cbsa housing vacancy rate (units_vac / units_tot, B25002)
+#   vacancy_rate_metro housing vacancy rate (units_vac / units_tot, B25002)
+#   log_median_inc_metro pop.-weighted mean of log tract median income (B19013)
+#   census_region     Census region (Northeast/Midwest/South/West) of the CBSA,
+#                     assigned to the region of its population-dominant constituent state
 #
 #   From PUMS microdata (pums_hh.parquet):
-#   gini_inc_cbsa     weighted Gini of equivalised household income
-#   unemp_rate_cbsa   unemployment rate among household heads in the labour force
-#   gini_rent_cbsa         weighted Gini of gross rent in 1999 USD (renters only; HHWT)
-#   gini_val_cbsa          weighted Gini of home value in 1999 USD (owners only; HHWT)
-#   gini_housing_cbsa      pooled Gini of housing cost (rent | imputed rent); metro×year cap rate
-#   gini_housing_cbsa_5pct pooled Gini; fixed 5 % p.a. cap rate (robustness)
-#   gini_housing_cbsa_7pct pooled Gini; fixed 7 % p.a. cap rate (robustness)
-#   gini_housing_cbsa_natl pooled Gini; year-specific national cap rate (robustness)
+#   gini_inc_metro     weighted Gini of equivalised household income
+#   unemp_rate_metro   unemployment rate among household heads in the labour force
+#   gini_rent_metro         weighted Gini of contract rent in 1999 USD (renters only; HHWT)
+#   gini_val_metro          weighted Gini of home value in 1999 USD (owners only; HHWT)
+#   gini_housing_metro      pooled Gini of housing quality proxy; metro×year cap rate.
+#                           Renters: rent_real (contract rent, excl. utilities).
+#                           Owners:  valueh_real × cap_rate / 12 (imputed contract rent).
+#                           Utility costs excluded: they conflate size with condition.
+#   gini_housing_metro_5pct pooled Gini; fixed 5 % p.a. cap rate (robustness)
+#   gini_housing_metro_natl pooled Gini; year-specific national cap rate (robustness)
 #
 # Outputs:
-#   data/cbsa_vars.parquet       one row per CBSA × year
-#   data/pums_analysis.parquet   pums_hh joined with cbsa_controls, plus:
+#   data/metro_vars.parquet       one row per CBSA × year
+#   data/pums_analysis.parquet   pums_hh joined with metro_vars, plus:
 #     cap_rate_metro   metro × year cap rate (12 × med_rent / med_val; from PUMS)
-#     cost_to_inc      valueh_real × cap_rate_metro / hhincome_real
-#                      annualised imputed cost-to-income ratio [owners, hhincome_real > 0]
-#                      flow/flow analog to rent_to_inc; CPI99 cancels
+#     cost_to_inc      (valueh_real × cap_rate_metro + util_monthly_real × 12) / hhincome_real
+#                      annualised imputed cost-to-income ratio [owners, hhincome_real > 0];
+#                      utilities added to match gross rent definition; CPI99 cancels
+#     quality          z-score of log housing quality proxy within YEAR × CBSA × tenure:
+#                      renters: log(rent_real); owners: log(valueh_real).
+#                      Log transformation before standardising: prices are log-normal,
+#                      so z-score(log price) is symmetric and consistent with log_equiv_inc.
+#     quality_rc       robustness version: renters standardised from recent movers only;
+#                      owner branch identical to quality
 
 
 ## ── SETUP ────────────────────────────────────────────────────────────────────
 
-library(nanoparquet)
+library(arrow)
 library(dplyr)
 library(tidyr)
 
 data_dir <- "./data/" # TODO for replication: change paths in SETUP chunk
 
-acs <- read_parquet("./data/acs_top100.parquet")
-
+acs <- read_parquet("./data/acs_metro.parquet")
 pums <- read_parquet("./data/pums_hh.parquet") |>
   mutate(YEAR = as.integer(YEAR))
 
@@ -105,9 +115,10 @@ H_binary <- function(df, col1, col2 = NULL, n = NULL) {
   p       <- sum(n1, na.rm = TRUE) / T_total
   E_total <- entropy(p)
   if (E_total == 0) return(0)
-  p_j <- n1 / t_j
-  E_j <- entropy(p_j)
-  1 - sum(t_j * E_j, na.rm = TRUE) / (T_total * E_total)
+  p_j    <- n1 / t_j
+  E_j    <- entropy(p_j)
+  result <- 1 - sum(t_j * E_j, na.rm = TRUE) / (T_total * E_total)
+  if (!is.finite(result) || result < 0 || result > 1) NA_real_ else result
 }
 
 # Binary Theil H at ordered cutpoint p of cols (households in cols[1..p] vs cols[p+1..K])
@@ -123,6 +134,8 @@ H_R_bracket <- function(df, cols) {
   K       <- length(cols)
   cum_p   <- cumsum(colSums(df[, cols], na.rm = TRUE))
   cum_p   <- cum_p / cum_p[K]
+  # Guard: degenerate cell (all-zero counts or zero total)
+  if (!is.finite(cum_p[K]) || cum_p[K] == 0) return(NA_real_)
 
   p_i   <- cum_p[seq_len(K - 1)]
   E_p_i <- entropy(p_i)
@@ -141,12 +154,15 @@ H_R_bracket <- function(df, cols) {
     H_p_model$coefficients[5] * p^4
   }
 
-  integral <- integrate(function(p) H_p_fun(p) * E_p_fun(p), 0, 1)
+  integral <- tryCatch(
+    integrate(function(p) H_p_fun(p) * E_p_fun(p), 0, 1),
+    error = function(e) list(value = NA_real_)
+  )
   result   <- 2 * log(2) * integral$value
   # H is bounded [0,1]; negative results are a polynomial-smoothing artifact
   # (the 4th-degree fit can extrapolate below zero near the tails, e.g. when
   # many units are bunched in the top bracket and the CDF plateaus early).
-  if (result < 0) NA_real_ else result
+  if (!is.finite(result) || result < 0 || result > 1) NA_real_ else result
 }
 
 # Multigroup entropy (log2; 0 * log(0) := 0)
@@ -164,9 +180,10 @@ H_multi <- function(df, cols) {
   pi_g    <- colSums(counts, na.rm = TRUE) / T_tot
   E_city  <- entropy_multi(pi_g)
   if (E_city == 0) return(0)
-  p_gj    <- counts / pmax(t_j, 1)
-  E_j     <- apply(p_gj, 1, entropy_multi)
-  1 - sum(t_j * E_j, na.rm = TRUE) / (T_tot * E_city)
+  p_gj   <- counts / pmax(t_j, 1)
+  E_j    <- apply(p_gj, 1, entropy_multi)
+  result <- 1 - sum(t_j * E_j, na.rm = TRUE) / (T_tot * E_city)
+  if (!is.finite(result) || result < 0 || result > 1) NA_real_ else result
 }
 
 
@@ -178,8 +195,8 @@ H_multi <- function(df, cols) {
 inc_cols <- paste0("inc_", sprintf("%02d", 1:16))
 
 seg_income <- acs |>
-  select(GEOID, CBSAFP, year, all_of(inc_cols)) |>
-  group_by(CBSAFP, year) |>
+  select(metro_area, year, all_of(inc_cols)) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(H_inc = H_R_bracket(.x, inc_cols))) |>
   ungroup()
 
@@ -193,8 +210,8 @@ seg_income <- acs |>
 # income share reaches or exceeds 0.5; it varies across CBSAs and waves.
 
 seg_income_p50 <- acs |>
-  select(GEOID, CBSAFP, year, all_of(inc_cols)) |>
-  group_by(CBSAFP, year) |>
+  select(metro_area, year, all_of(inc_cols)) |>
+  group_by(metro_area, year) |>
   group_modify(~ {
     totals <- colSums(.x[inc_cols], na.rm = TRUE)
     cum_p  <- cumsum(totals) / sum(totals)
@@ -215,15 +232,15 @@ inc_nhb_cols <- paste0("inc_nhb_", sprintf("%02d", 1:16))
 inc_his_cols <- paste0("inc_his_", sprintf("%02d", 1:16))
 
 seg_income_race <- acs |>
-  select(GEOID, CBSAFP, year,
+  select(metro_area, year,
          all_of(c(inc_nhw_cols, inc_nhb_cols, inc_his_cols))) |>
-  group_by(CBSAFP, year) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(
-    H_inc_nhw = if (sum(.x[inc_nhw_cols], na.rm = TRUE) > 0)
+    H_inc_nhw = if (sum(.x[, inc_nhw_cols], na.rm = TRUE) > 0)
                   H_R_bracket(.x, inc_nhw_cols) else NA_real_,
-    H_inc_nhb = if (sum(.x[inc_nhb_cols], na.rm = TRUE) > 0)
+    H_inc_nhb = if (sum(.x[, inc_nhb_cols], na.rm = TRUE) > 0)
                   H_R_bracket(.x, inc_nhb_cols) else NA_real_,
-    H_inc_his = if (sum(.x[inc_his_cols], na.rm = TRUE) > 0)
+    H_inc_his = if (sum(.x[, inc_his_cols], na.rm = TRUE) > 0)
                   H_R_bracket(.x, inc_his_cols) else NA_real_
   )) |>
   ungroup()
@@ -242,15 +259,15 @@ p50_from_cols <- function(df, cols) {
 }
 
 seg_income_race_p50 <- acs |>
-  select(GEOID, CBSAFP, year,
+  select(metro_area, year,
          all_of(c(inc_nhw_cols, inc_nhb_cols, inc_his_cols))) |>
-  group_by(CBSAFP, year) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(
-    H_inc_nhw_p50 = if (sum(.x[inc_nhw_cols], na.rm = TRUE) > 0)
+    H_inc_nhw_p50 = if (sum(.x[, inc_nhw_cols], na.rm = TRUE) > 0)
                       H_p_bracket(.x, p50_from_cols(.x, inc_nhw_cols), inc_nhw_cols) else NA_real_,
-    H_inc_nhb_p50 = if (sum(.x[inc_nhb_cols], na.rm = TRUE) > 0)
+    H_inc_nhb_p50 = if (sum(.x[, inc_nhb_cols], na.rm = TRUE) > 0)
                       H_p_bracket(.x, p50_from_cols(.x, inc_nhb_cols), inc_nhb_cols) else NA_real_,
-    H_inc_his_p50 = if (sum(.x[inc_his_cols], na.rm = TRUE) > 0)
+    H_inc_his_p50 = if (sum(.x[, inc_his_cols], na.rm = TRUE) > 0)
                       H_p_bracket(.x, p50_from_cols(.x, inc_his_cols), inc_his_cols) else NA_real_
   )) |>
   ungroup()
@@ -258,6 +275,13 @@ seg_income_race_p50 <- acs |>
 
 ## ── REARDON DECOMPOSITION OF H^R ─────────────────────────────────────────────
 # Decomposes H_inc into within-race and between-race components.
+# Motivation: H_inc conflates pure income sorting (households of different
+# incomes sorting across neighbourhoods regardless of race) with racial sorting
+# (racial groups with different income distributions being spatially separated).
+# H_inc_within isolates the former; H_inc_between captures the latter. Using
+# H_inc_within as the main predictor, or controlling for H_inc_between alongside
+# H_bw, allows robustness checks that rule out racial segregation as the true
+# driver of any observed income-segregation effect on housing outcomes.
 #
 #   H_inc = H_inc_within + H_inc_between
 #
@@ -274,24 +298,13 @@ seg_income_race_p50 <- acs |>
 # an approximation that understates H_inc_within (and overstates H_inc_between)
 # to the extent that group income distributions diverge from the overall.
 #
-# TODO: check Reardon & Bischoff (2011, AJS 116:1092–1153) and Reardon's CEPA
-# working papers on income segregation for whether they (a) formally state the
-# decomposability of H^R, and (b) apply it — they do run separate analyses by
-# race in the AJS paper which may amount to the same thing implicitly. Clarify
-# the correct citation and whether the entropy-weighted exact version is needed.
-#
-# TODO: if exact decomposition is warranted, implement H_R_decompose(df,
-# cols_all, cols_list): at each of the K−1 cutpoints compute H_g(p) and E_g(p)
-# per group, sum Σ_g π_g * E_g(p) * H_g(p), smooth with the degree-4 polynomial,
-# and integrate over [0,1] to obtain H_inc_within; H_inc_between = H_inc − H_inc_within.
-#
 # NOTE: NH-White + NH-Black + Hispanic do not cover all households. In metros
 # with a large NH-Other population (e.g. Pacific metros with many NH-Asian HH),
 # π_nhw + π_nhb + π_his < 1, so H_inc_within is a lower bound on the true
 # within-race component and H_inc_between is correspondingly overstated.
 
 metro_hh_shares <- acs |>
-  group_by(CBSAFP, year) |>
+  group_by(metro_area, year) |>
   summarise(
     pi_nhw = sum(inc_nhw_tot, na.rm = TRUE) / sum(inc_tot, na.rm = TRUE),
     pi_nhb = sum(inc_nhb_tot, na.rm = TRUE) / sum(inc_tot, na.rm = TRUE),
@@ -300,13 +313,13 @@ metro_hh_shares <- acs |>
   )
 
 seg_decomp <- seg_income |>
-  left_join(seg_income_race, by = c("CBSAFP", "year")) |>
-  left_join(metro_hh_shares, by = c("CBSAFP", "year")) |>
+  left_join(seg_income_race, by = c("metro_area", "year")) |>
+  left_join(metro_hh_shares, by = c("metro_area", "year")) |>
   mutate(
     H_inc_within  = pi_nhw * H_inc_nhw + pi_nhb * H_inc_nhb + pi_his * H_inc_his,
     H_inc_between = H_inc - H_inc_within
   ) |>
-  select(CBSAFP, year, H_inc_within, H_inc_between)
+  select(metro_area, year, H_inc_within, H_inc_between)
 
 
 ## ── RACIAL HOMEOWNERSHIP RATES AND GAPS ──────────────────────────────────────
@@ -315,19 +328,19 @@ seg_decomp <- seg_income |>
 # Gaps are arithmetic (percentage point) differences, NHW as reference.
 
 seg_tenure_race <- acs |>
-  group_by(CBSAFP, year) |>
+  group_by(metro_area, year) |>
   summarise(
-    pct_owner_nhw_cbsa = sum(own_nhw, na.rm = TRUE) /
+    pct_owner_nhw_metro = sum(own_nhw, na.rm = TRUE) /
                          sum(own_nhw + rent_nhw, na.rm = TRUE),
-    pct_owner_nhb_cbsa = sum(own_nhb, na.rm = TRUE) /
+    pct_owner_nhb_metro = sum(own_nhb, na.rm = TRUE) /
                          sum(own_nhb + rent_nhb, na.rm = TRUE),
-    pct_owner_his_cbsa = sum(own_his, na.rm = TRUE) /
+    pct_owner_his_metro = sum(own_his, na.rm = TRUE) /
                          sum(own_his + rent_his, na.rm = TRUE),
     .groups = "drop"
   ) |>
   mutate(
-    owner_gap_bw_cbsa = pct_owner_nhw_cbsa - pct_owner_nhb_cbsa,
-    owner_gap_hw_cbsa = pct_owner_nhw_cbsa - pct_owner_his_cbsa
+    owner_gap_bw_metro = pct_owner_nhw_metro - pct_owner_nhb_metro,
+    owner_gap_hw_metro = pct_owner_nhw_metro - pct_owner_his_metro
   )
 
 
@@ -337,8 +350,8 @@ seg_tenure_race <- acs |>
 # nhblack and nhwhite are tract counts from B03002 E004 and E003 respectively.
 
 seg_race <- acs |>
-  select(GEOID, CBSAFP, year, nhblack, nhwhite) |>
-  group_by(CBSAFP, year) |>
+  select(GEOID, metro_area, year, nhblack, nhwhite) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(H_bw = H_binary(.x, "nhblack", "nhwhite"))) |>
   ungroup()
 
@@ -350,8 +363,8 @@ race_cols <- c("nhwhite", "nhblack", "nhispanic", "nhother")
 
 seg_race_multi <- acs |>
   mutate(nhother = pmax(nhwhite_tot - nhwhite - nhblack - nhispanic, 0)) |>
-  select(GEOID, CBSAFP, year, all_of(race_cols)) |>
-  group_by(CBSAFP, year) |>
+  select(GEOID, metro_area, year, all_of(race_cols)) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(H_race_multi = H_multi(.x, race_cols))) |>
   ungroup()
 
@@ -362,8 +375,8 @@ seg_race_multi <- acs |>
 # own and rent are tract counts from B25003 E002 and E003 respectively.
 
 seg_tenure <- acs |>
-  select(GEOID, CBSAFP, year, own, rent) |>
-  group_by(CBSAFP, year) |>
+  select(GEOID, metro_area, year, own, rent) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(H_tenure = H_binary(.x, "rent", "own"))) |>
   ungroup()
 
@@ -372,12 +385,12 @@ seg_tenure <- acs |>
 # Binary Theil H for owners vs. renters within each racial group across tracts.
 # Captures how spatially separated owners and renters of the same race are —
 # the closest available housing-inequality-in-space analog to H_inc_nhw/nhb/his
-# (within-race rent/value H^R is not feasible: B25063/B25075 by race are not
+# (within-race rent/value H^R is not feasible: B25056/B25075 by race are not
 # published at tract level).
 
 seg_tenure_within <- acs |>
-  select(GEOID, CBSAFP, year, own_nhw, rent_nhw, own_nhb, rent_nhb, own_his, rent_his) |>
-  group_by(CBSAFP, year) |>
+  select(GEOID, metro_area, year, own_nhw, rent_nhw, own_nhb, rent_nhb, own_his, rent_his) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(
     H_tenure_nhw = H_binary(.x, "rent_nhw", "own_nhw"),
     H_tenure_nhb = H_binary(.x, "rent_nhb", "own_nhb"),
@@ -387,7 +400,8 @@ seg_tenure_within <- acs |>
 
 
 ## ── RENT SEGREGATION H^R ─────────────────────────────────────────────────────
-# Rank-order Theil H^R for gross rent using B25063 cash-rent dollar brackets.
+# Rank-order Theil H^R for contract rent using B25056 cash-rent dollar brackets.
+# Contract rent excludes utilities, consistent with the PUMS quality proxy (RENT).
 # 2009/2014: rent_01–rent_21 (E003–E023); 2019/2024: rent_01–rent_24 (E003–E026).
 # "No cash rent" units are excluded. Trailing NA columns (2009/2014) are dropped
 # per CBSA×year before the polynomial fit to avoid corrupting cum_p at p=1.
@@ -397,10 +411,10 @@ seg_tenure_within <- acs |>
 rent_cols <- paste0("rent_", sprintf("%02d", 1:24))
 
 seg_rent <- acs |>
-  select(GEOID, CBSAFP, year, all_of(rent_cols)) |>
-  group_by(CBSAFP, year) |>
+  select(metro_area, year, all_of(rent_cols)) |>
+  group_by(metro_area, year) |>
   group_modify(~ {
-    active <- rent_cols[colSums(!is.na(.x[rent_cols])) > 0]
+    active <- rent_cols[colSums(!is.na(.x[, rent_cols, drop = FALSE])) > 0]
     tibble(H_rent = H_R_bracket(.x, active))
   }) |>
   ungroup()
@@ -416,10 +430,10 @@ seg_rent <- acs |>
 val_cols <- paste0("val_", sprintf("%02d", 1:26))
 
 seg_val <- acs |>
-  select(GEOID, CBSAFP, year, all_of(val_cols)) |>
-  group_by(CBSAFP, year) |>
+  select(metro_area, year, all_of(val_cols)) |>
+  group_by(metro_area, year) |>
   group_modify(~ {
-    active <- val_cols[colSums(!is.na(.x[val_cols])) > 0]
+    active <- val_cols[colSums(!is.na(.x[, val_cols, drop = FALSE])) > 0]
     tibble(H_val = H_R_bracket(.x, active))
   }) |>
   ungroup()
@@ -432,42 +446,45 @@ seg_val <- acs |>
 
 seg_vacancy <- acs |>
   mutate(units_occ = pmax(units_tot - units_vac, 0L)) |>
-  select(GEOID, CBSAFP, year, units_vac, units_occ) |>
-  group_by(CBSAFP, year) |>
+  select(GEOID, metro_area, year, units_vac, units_occ) |>
+  group_by(metro_area, year) |>
   group_modify(~ tibble(H_vac = H_binary(.x, "units_vac", "units_occ"))) |>
   ungroup()
 
 
 ## ── CITY-LEVEL ACS AGGREGATES ────────────────────────────────────────────────
 # All variables aggregated from tract counts to CBSA × year.
-# pct_college_cbsa is NA for 2009 (B15003 not in 2005-2009 ACS5a); the {…}
+# pct_college_metro is NA for 2009 (B15003 not in 2005-2009 ACS5a); the {…}
 # block returns NA when the denominator sums to zero (all edu_tot are NA).
 
 acs_agg <- acs |>
-  group_by(CBSAFP, year) |>
+  group_by(metro_area, year) |>
   summarise(
-    pop_cbsa          = sum(pop,       na.rm = TRUE),
-    pct_renter_cbsa   = sum(rent,      na.rm = TRUE) /
+    n_tracts           = n(),
+    pop_metro          = sum(pop,       na.rm = TRUE),
+    pct_renter_metro   = sum(rent,      na.rm = TRUE) /
                         sum(rent + own, na.rm = TRUE),
-    pct_nhwhite_cbsa  = sum(nhwhite,   na.rm = TRUE) /
+    pct_nhwhite_metro  = sum(nhwhite,   na.rm = TRUE) /
                         sum(nhwhite_tot, na.rm = TRUE),
-    pct_nhblack_cbsa  = sum(nhblack,   na.rm = TRUE) /
+    pct_nhblack_metro  = sum(nhblack,   na.rm = TRUE) /
                         sum(nhwhite_tot, na.rm = TRUE),
-    pct_hispanic_cbsa = sum(nhispanic, na.rm = TRUE) /
+    pct_hispanic_metro = sum(nhispanic, na.rm = TRUE) /
                         sum(nhwhite_tot, na.rm = TRUE),
-    pct_college_cbsa  = {
+    pct_college_metro  = {
       denom <- sum(edu_tot, na.rm = TRUE)
       if (denom == 0) NA_real_
       else sum(edu_ba_22 + edu_ba_23 + edu_ba_24 + edu_ba_25, na.rm = TRUE) / denom
     },
-    rent_burden_cbsa  = sum(rb_30_35 + rb_35_40 + rb_40_50 + rb_50plus, na.rm = TRUE) /
+    rent_burden_metro  = sum(rb_30_35 + rb_35_40 + rb_40_50 + rb_50plus, na.rm = TRUE) /
                         sum(rb_tot, na.rm = TRUE),
-    vacancy_rate_cbsa      = sum(units_vac, na.rm = TRUE) / sum(units_tot, na.rm = TRUE),
+    vacancy_rate_metro      = sum(units_vac, na.rm = TRUE) / sum(units_tot, na.rm = TRUE),
+    log_median_inc_metro    = weighted.mean(log(ifelse(median_inc > 0, median_inc, NA_real_)),
+                                           pop, na.rm = TRUE),
     .groups = "drop"
   ) |>
-  arrange(CBSAFP, year) |>
-  group_by(CBSAFP) |>
-  mutate(pop_growth_cbsa = (pop_cbsa - lag(pop_cbsa)) / lag(pop_cbsa)) |> # pop_growth missing in first wave
+  arrange(metro_area, year) |>
+  group_by(metro_area) |>
+  mutate(pop_growth_metro = (pop_metro - lag(pop_metro)) / lag(pop_metro)) |> # pop_growth missing in first wave
   ungroup()
 
 
@@ -495,94 +512,99 @@ ineq <- pums |>
   mutate(hhincome_raw = HHINCOME * CPI99) |>
   filter(!is.na(hhincome_raw), hhincome_raw > 0) |>
   mutate(equiv_income = pmax(hhincome_raw / sqrt(NUMPREC), 1)) |>
-  group_by(CBSAFP, YEAR) |>
+  group_by(metro_area, YEAR) |>
   summarise(
-    gini_inc_cbsa = wtd_gini(equiv_income, HHWT),
+    gini_inc_metro = wtd_gini(equiv_income, HHWT),
     .groups = "drop"
   ) |>
+  rename(year = YEAR)
+
+# Number of PUMS household observations per metro × year.
+n_pums <- pums |>
+  group_by(metro_area, YEAR) |>
+  summarise(n_metro = n(), .groups = "drop") |>
   rename(year = YEAR)
 
 # Unemployment rate: unemployed / (employed + unemployed) among household heads,
 # weighted by PERWT. EMPSTAT: 1 = employed, 2 = unemployed, 3 = not in labour force.
 unemp <- pums |>
-  filter(as.integer(EMPSTAT) %in% 1:2) |>
-  group_by(CBSAFP, YEAR) |>
+  filter(unclass(EMPSTAT) %in% 1:2) |>
+  group_by(metro_area, YEAR) |>
   summarise(
-    unemp_rate_cbsa = sum(PERWT[as.integer(EMPSTAT) == 2L], na.rm = TRUE) / sum(PERWT),
+    unemp_rate_metro = sum(PERWT[unclass(EMPSTAT) == 2L], na.rm = TRUE) / sum(PERWT),
     .groups = "drop"
   ) |>
   rename(year = YEAR)
 
 
 ## ── RENT AND HOME VALUE INEQUALITY ───────────────────────────────────────────
-# Weighted Gini of gross rent (renters) and home value (owners), using PUMS
-# inflation-adjusted real values (1999 USD). Neither variable is top-coded in
-# dataprepPUMS.R (unlike hhincome_real), so the full distribution is reflected.
-# RENTGRS is already NA for owners and VALUEH is NA for renters; only strictly
-# positive values are included (the GQ == 1 filter excludes institutional units
-# where VALUEH == 0 could appear).
-#
-# Note: the PUMS `quality` variable (z-score of rentgrs_real or valueh_real,
-# standardised within YEAR × CBSA × tenure) is not suitable for Gini because
-# z-scores take negative values. gini_rent_cbsa and gini_val_cbsa are the
-# natural inequality counterparts to quality within each tenure group.
+# Weighted Gini of contract rent (renters) and home value (owners), using PUMS
+# inflation-adjusted real values (1999 USD). Contract rent (rent_real) is the
+# quality proxy for renters — it reflects the market price of the unit itself,
+# excluding utilities. gini_rent_metro and gini_val_metro are the natural
+# inequality counterparts to the quality z-score within each tenure group.
 
 ineq_rent <- pums |>
-  filter(renter == 1L, !is.na(rentgrs_real), rentgrs_real > 0) |>
-  group_by(CBSAFP, YEAR) |>
+  filter(renter == 1L, !is.na(rent_real), rent_real > 0) |>
+  group_by(metro_area, YEAR) |>
   summarise(
-    gini_rent_cbsa = wtd_gini(rentgrs_real, HHWT),
+    gini_rent_metro = wtd_gini(rent_real, HHWT),
     .groups = "drop"
   ) |>
   rename(year = YEAR)
 
 ineq_val <- pums |>
   filter(renter == 0L, !is.na(valueh_real), valueh_real > 0) |>
-  group_by(CBSAFP, YEAR) |>
+  group_by(metro_area, YEAR) |>
   summarise(
-    gini_val_cbsa = wtd_gini(valueh_real, HHWT),
+    gini_val_metro = wtd_gini(valueh_real, HHWT),
     .groups = "drop"
   ) |>
   rename(year = YEAR)
 
 
-## ── POOLED HOUSING COST GINI ─────────────────────────────────────────────────
-# Combines renter and owner housing costs on a common monthly scale.
-# For owners: imputed monthly rent = valueh_real × cap_rate / 12.
-# For renters: gross rent (rentgrs_real) is used directly.
-# The pooled Gini captures both within-tenure inequality AND the renter/owner gap.
+## ── POOLED HOUSING QUALITY GINI ──────────────────────────────────────────────
+# Combines renter and owner housing quality proxies on a common monthly scale.
+# For renters: contract rent (rent_real) — market price of the unit, excl. utilities.
+# For owners:  imputed monthly contract rent = valueh_real × cap_rate / 12.
+# Utility costs are excluded from both sides: they conflate unit size with condition
+# and are not a clean quality signal. Captures within-tenure inequality AND the
+# renter/owner gap in housing quality.
 #
-# Four cap rate variants (main spec + three robustness checks):
-#   metro×year  12 × wtd_median(rentgrs_real) / wtd_median(valueh_real), from PUMS.
-#               Reflects each metro's actual rent-to-price relationship per wave.
-#   5 % p.a.    Standard housing-economics benchmark (fixed).
-#   7 % p.a.    Higher cost-of-capital alternative (fixed).
+# Three cap rate variants (main spec + two robustness checks):
+#   metro×year  12 × wtd_median(rent_real) / wtd_median(valueh_real), from PUMS.
+#               Reflects each metro's actual contract-rent-to-price relationship.
+#   5 % p.a.    Fixed rate approximating the pre-boom historical average (Davis et al. 2008:
+#               5–5.5 % from 1960–1995); removes all cap rate variation.
 #   national    HHWT-weighted mean of metro cap rates per wave. Removes cross-metro
-#               variation in cap rates; if results hold vs. metro spec, the local
-#               rent-to-price ratio is not driving findings.
+#               variation in cap rates while preserving temporal variation; if results
+#               hold vs. metro spec, the local rent-to-price ratio is not driving findings.
 
 # Metro×year PUMS weighted medians
+# Cap rate uses contract rent (not gross rent) so that value × cap_rate / 12
+# gives the implied monthly CONTRACT rent — the market price of the unit itself,
+# excluding utilities. Gross rent is preserved separately for burden measures.
 med_rent_pums <- pums |>
-  filter(renter == 1L, !is.na(rentgrs_real), rentgrs_real > 0) |>
-  group_by(CBSAFP, YEAR) |>
-  summarise(med_rent = wtd_median(rentgrs_real, HHWT), .groups = "drop")
+  filter(renter == 1L, !is.na(rent_real), rent_real > 0) |>
+  group_by(metro_area, YEAR) |>
+  summarise(med_rent = wtd_median(rent_real, HHWT), .groups = "drop")
 
 med_val_pums <- pums |>
   filter(renter == 0L, !is.na(valueh_real), valueh_real > 0) |>
-  group_by(CBSAFP, YEAR) |>
+  group_by(metro_area, YEAR) |>
   summarise(med_val = wtd_median(valueh_real, HHWT), .groups = "drop")
 
 cap_rates <- med_rent_pums |>
-  left_join(med_val_pums, by = c("CBSAFP", "YEAR")) |>
+  left_join(med_val_pums, by = c("metro_area", "YEAR")) |>
   mutate(cap_rate_metro = 12 * med_rent / med_val)
 
 # Year-specific national cap rate: HHWT-weighted mean across metros
 cap_rate_natl <- cap_rates |>
   left_join(
     pums |>
-      group_by(CBSAFP, YEAR) |>
+      group_by(metro_area, YEAR) |>
       summarise(tot_hhwt = sum(HHWT, na.rm = TRUE), .groups = "drop"),
-    by = c("CBSAFP", "YEAR")
+    by = c("metro_area", "YEAR")
   ) |>
   group_by(YEAR) |>
   summarise(
@@ -590,89 +612,199 @@ cap_rate_natl <- cap_rates |>
     .groups = "drop"
   )
 
-# Pooled Gini for all four specs
+# Pooled Gini for all three cap rate specs
 gini_housing <- pums |>
   filter(
-    (renter == 1L & !is.na(rentgrs_real) & rentgrs_real > 0) |
-    (renter == 0L & !is.na(valueh_real)  & valueh_real  > 0)
+    (renter == 1L & !is.na(rent_real)   & rent_real   > 0) |
+    (renter == 0L & !is.na(valueh_real) & valueh_real > 0)
   ) |>
-  left_join(cap_rates   |> select(CBSAFP, YEAR, cap_rate_metro), by = c("CBSAFP", "YEAR")) |>
+  left_join(cap_rates   |> select(metro_area, YEAR, cap_rate_metro), by = c("metro_area", "YEAR")) |>
   left_join(cap_rate_natl, by = "YEAR") |>
   mutate(
-    hcost_metro = if_else(renter == 1L, rentgrs_real, valueh_real * cap_rate_metro / 12),
-    hcost_5pct  = if_else(renter == 1L, rentgrs_real, valueh_real * 0.05 / 12),
-    hcost_7pct  = if_else(renter == 1L, rentgrs_real, valueh_real * 0.07 / 12),
-    hcost_natl  = if_else(renter == 1L, rentgrs_real, valueh_real * cap_rate_natl / 12)
+    hcost_metro = if_else(renter == 1L, rent_real, valueh_real * cap_rate_metro / 12),
+    hcost_5pct  = if_else(renter == 1L, rent_real, valueh_real * 0.05 / 12),
+    hcost_natl  = if_else(renter == 1L, rent_real, valueh_real * cap_rate_natl / 12)
   ) |>
-  group_by(CBSAFP, YEAR) |>
+  group_by(metro_area, YEAR) |>
   summarise(
-    gini_housing_cbsa      = wtd_gini(hcost_metro[!is.na(hcost_metro)], HHWT[!is.na(hcost_metro)]),
-    gini_housing_cbsa_5pct = wtd_gini(hcost_5pct,  HHWT),
-    gini_housing_cbsa_7pct = wtd_gini(hcost_7pct,  HHWT),
-    gini_housing_cbsa_natl = wtd_gini(hcost_natl,  HHWT),
+    gini_housing_metro      = wtd_gini(hcost_metro[!is.na(hcost_metro)], HHWT[!is.na(hcost_metro)]),
+    gini_housing_metro_5pct = wtd_gini(hcost_5pct,  HHWT),
+    gini_housing_metro_natl = wtd_gini(hcost_natl,  HHWT),
     .groups = "drop"
   ) |>
   rename(year = YEAR)
 
 
+## ── CENSUS REGION ─────────────────────────────────────────────────────────────
+# Assign each CBSA to the Census region of its population-dominant constituent
+# state. CBSAs occasionally span state lines; population is summed across all
+# waves to break ties stably.
+
+state_to_region <- c(
+  CT = "Northeast", ME = "Northeast", MA = "Northeast", NH = "Northeast",
+  RI = "Northeast", VT = "Northeast", NJ = "Northeast", NY = "Northeast", PA = "Northeast",
+  IL = "Midwest",   IN = "Midwest",   MI = "Midwest",   OH = "Midwest",   WI = "Midwest",
+  IA = "Midwest",   KS = "Midwest",   MN = "Midwest",   MO = "Midwest",   NE = "Midwest",
+  ND = "Midwest",   SD = "Midwest",
+  DE = "South", FL = "South", GA = "South", MD = "South", NC = "South",
+  SC = "South", VA = "South", DC = "South", WV = "South", AL = "South",
+  KY = "South", MS = "South", TN = "South", AR = "South", LA = "South",
+  OK = "South", TX = "South",
+  AZ = "West", CO = "West", ID = "West", MT = "West", NV = "West",
+  NM = "West", UT = "West", WY = "West", AK = "West", CA = "West",
+  HI = "West", OR = "West", WA = "West"
+)
+
+state_to_division <- c(
+  # New England
+  CT = "New England",    ME = "New England",    MA = "New England",
+  NH = "New England",    RI = "New England",    VT = "New England",
+  # Middle Atlantic
+  NJ = "Middle Atlantic", NY = "Middle Atlantic", PA = "Middle Atlantic",
+  # East North Central
+  IL = "E North Central", IN = "E North Central", MI = "E North Central",
+  OH = "E North Central", WI = "E North Central",
+  # West North Central
+  IA = "W North Central", KS = "W North Central", MN = "W North Central",
+  MO = "W North Central", NE = "W North Central", ND = "W North Central",
+  SD = "W North Central",
+  # South Atlantic
+  DE = "South Atlantic", FL = "South Atlantic", GA = "South Atlantic",
+  MD = "South Atlantic", NC = "South Atlantic", SC = "South Atlantic",
+  VA = "South Atlantic", DC = "South Atlantic", WV = "South Atlantic",
+  # East South Central
+  AL = "E South Central", KY = "E South Central",
+  MS = "E South Central", TN = "E South Central",
+  # West South Central
+  AR = "W South Central", LA = "W South Central",
+  OK = "W South Central", TX = "W South Central",
+  # Mountain
+  AZ = "Mountain", CO = "Mountain", ID = "Mountain", MT = "Mountain",
+  NV = "Mountain", NM = "Mountain", UT = "Mountain", WY = "Mountain",
+  AK = "Mountain",
+  # Pacific
+  CA = "Pacific", HI = "Pacific", OR = "Pacific", WA = "Pacific"
+)
+
+metro_region <- acs |>
+  group_by(metro_area, STUSAB) |>
+  summarise(pop = sum(pop, na.rm = TRUE), .groups = "drop") |>
+  group_by(metro_area) |>
+  slice_max(pop, n = 1, with_ties = FALSE) |>
+  ungroup() |>
+  mutate(
+    census_region   = factor(state_to_region[STUSAB],
+                             levels = c("Northeast", "Midwest", "South", "West")),
+    census_division = factor(state_to_division[STUSAB],
+                             levels = c("New England", "Middle Atlantic",
+                                        "E North Central", "W North Central",
+                                        "South Atlantic", "E South Central", "W South Central",
+                                        "Mountain", "Pacific"))
+  ) |>
+  select(metro_area, census_region, census_division)
+
+
 ## ── MERGE AND SAVE ────────────────────────────────────────────────────────────
 
-cbsa_controls <- seg_income |>
-  left_join(seg_income_p50,   by = c("CBSAFP", "year")) |>
-  left_join(seg_income_race,      by = c("CBSAFP", "year")) |>
-  left_join(seg_income_race_p50, by = c("CBSAFP", "year")) |>
-  left_join(seg_decomp,       by = c("CBSAFP", "year")) |>
-  left_join(seg_tenure_race,  by = c("CBSAFP", "year")) |>
-  left_join(seg_race,         by = c("CBSAFP", "year")) |>
-  left_join(seg_tenure,        by = c("CBSAFP", "year")) |>
-  left_join(seg_tenure_within, by = c("CBSAFP", "year")) |>
-  left_join(seg_race_multi,    by = c("CBSAFP", "year")) |>
-  left_join(seg_rent,       by = c("CBSAFP", "year")) |>
-  left_join(seg_val,        by = c("CBSAFP", "year")) |>
-  left_join(seg_vacancy,    by = c("CBSAFP", "year")) |>
-  left_join(acs_agg,        by = c("CBSAFP", "year")) |>
-  left_join(ineq,           by = c("CBSAFP", "year")) |>
-  left_join(unemp,          by = c("CBSAFP", "year")) |>
-  left_join(ineq_rent,      by = c("CBSAFP", "year")) |>
-  left_join(ineq_val,       by = c("CBSAFP", "year")) |>
-  left_join(gini_housing,   by = c("CBSAFP", "year"))
+metro_vars <- seg_income |>
+  left_join(seg_income_p50,   by = c("metro_area", "year")) |>
+  left_join(seg_income_race,      by = c("metro_area", "year")) |>
+  left_join(seg_income_race_p50, by = c("metro_area", "year")) |>
+  left_join(seg_decomp,       by = c("metro_area", "year")) |>
+  left_join(seg_tenure_race,  by = c("metro_area", "year")) |>
+  left_join(seg_race,         by = c("metro_area", "year")) |>
+  left_join(seg_tenure,        by = c("metro_area", "year")) |>
+  left_join(seg_tenure_within, by = c("metro_area", "year")) |>
+  left_join(seg_race_multi,    by = c("metro_area", "year")) |>
+  left_join(seg_rent,       by = c("metro_area", "year")) |>
+  left_join(seg_val,        by = c("metro_area", "year")) |>
+  left_join(seg_vacancy,    by = c("metro_area", "year")) |>
+  left_join(acs_agg,        by = c("metro_area", "year")) |>
+  left_join(ineq,           by = c("metro_area", "year")) |>
+  left_join(unemp,          by = c("metro_area", "year")) |>
+  left_join(n_pums,         by = c("metro_area", "year")) |>
+  left_join(ineq_rent,      by = c("metro_area", "year")) |>
+  left_join(ineq_val,       by = c("metro_area", "year")) |>
+  left_join(gini_housing,   by = c("metro_area", "year"))
 
 
-cbsa_controls <- cbsa_controls |>
-  left_join(acs |> distinct(CBSAFP, CBSA_name, cbsa_name_short), by = "CBSAFP")
+metro_vars <- metro_vars |>
+  left_join(acs |> distinct(metro_area, metro_name, metro_name_short), by = "metro_area") |>
+  left_join(metro_region, by = "metro_area")
 
-write_parquet(cbsa_controls, file.path(data_dir, "cbsa_vars.parquet"))
+write_parquet(metro_vars, file.path(data_dir, "metro_vars.parquet"))
 
 pums_analysis <- pums |>
-  left_join(cbsa_controls |> select(-CBSA_name, -cbsa_name_short),
-            by = c("CBSAFP", "YEAR" = "year")) |>
-  left_join(cap_rates |> select(CBSAFP, YEAR, cap_rate_metro), by = c("CBSAFP", "YEAR")) |>
+  left_join(metro_vars |> select(-metro_name, -metro_name_short),
+            by = c("metro_area", "YEAR" = "year")) |>
+  left_join(cap_rates |> select(metro_area, YEAR, cap_rate_metro), by = c("metro_area", "YEAR")) |>
   mutate(
     # Imputed annual cost-to-income ratio for owners (CPI99 cancels; owners with
     # positive income and value). cap_rate_metro = 12 * med_rent / med_val, so
     # valueh_real * cap_rate_metro is the annualised imputed housing cost.
+    # util_monthly_real * 12 adds annual utility costs to match gross rent (RENTGRS),
+    # which already includes utilities in rent_to_inc.
     cost_to_inc = if_else(
       renter == 0L & hhincome_real > 0 & !is.na(valueh_real) & valueh_real > 0,
-      valueh_real * cap_rate_metro / hhincome_real,
+      (valueh_real * cap_rate_metro + coalesce(util_monthly_real, 0) * 12) / hhincome_real,
       NA_real_
     )
   )
+
+## ── HOUSING QUALITY Z-SCORES ──────────────────────────────────────────────────
+# Renters: log contract rent; owners: log home value.
+# Log transformation before z-scoring because housing prices are log-normally
+# distributed: raw prices are right-skewed and extreme values would dominate
+# the standardised score. Log prices are approximately symmetric, and the
+# resulting z-score has an elasticity interpretation consistent with the
+# log_equiv_inc predictor used in the individual-level regressions.
+# The Gini measures (gini_rent_metro, gini_val_metro, gini_housing_metro) are
+# kept on raw prices, following standard inequality measurement practice.
+
+pums_analysis <- pums_analysis |>
+  group_by(YEAR, metro_area, renter) |>
+  mutate(quality = if_else(
+    renter == 1L,
+    as.numeric(scale(log(rent_real))),
+    as.numeric(scale(log(valueh_real)))
+  )) |>
+  ungroup()
+
+# Robustness quality: renters standardised using recent movers only
+# (MOVEDIN >= YEAR - 2) to mitigate rent control distortions.
+# Owner branch is identical to quality (no rent control issue for owners).
+pums_analysis <- pums_analysis |>
+  group_by(YEAR, metro_area) |>
+  mutate(
+    quality_rc = if_else(
+      renter == 0L,
+      quality,
+      if_else(
+        recent_mover,
+        (log(rent_real) - mean(log(rent_real[recent_mover]), na.rm = TRUE)) /
+          sd(log(rent_real[recent_mover]), na.rm = TRUE),
+        NA_real_
+      )
+    )
+  ) |>
+  ungroup()
 
 write_parquet(pums_analysis, file.path(data_dir, "pums_analysis.parquet"))
 
 
 ## ── MISSING VALUE SUMMARY ────────────────────────────────────────────────────
 
-na_summary <- cbsa_controls |>
+na_summary <- metro_vars |>
   summarise(across(everything(), ~ sum(is.na(.)))) |>
   pivot_longer(everything(), names_to = "variable", values_to = "n_missing") |>
-  mutate(pct_missing = round(100 * n_missing / nrow(cbsa_controls), 1)) |>
+  mutate(pct_missing = round(100 * n_missing / nrow(metro_vars), 1)) |>
   filter(n_missing > 0)
 
 print(na_summary, n = Inf)
 
-# pct_college_cbsa and pop_growth_cbsa have missings (n = 100, pct = 25)
+# pct_college_metro and pop_growth_metro have missings (n = 381, pct = 25)
 # -> they are missing in one ACS period each
 # population growth would need population before 2005, NA due to lag
 # education missing in 2009 ACS
-# all other variables have no missings at all!
+# segregation indices have between 0.1 and 2.6 percent missings (n: 1 to 39), 
+# Gini indices have 0.5 percent missing values (n = 8)

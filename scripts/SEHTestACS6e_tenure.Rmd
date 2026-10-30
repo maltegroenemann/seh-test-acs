@@ -1,0 +1,176 @@
+---
+title: "A Socio-Economic Model of Residential Segregation, Neighborhood Change and Housing Inequality"
+subtitle: "Empirical Analysis: H5 — Segregation Moderates Income Inequality → Tenure Segregation"
+author: "Malte Grönemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error   = FALSE,
+                      out.width = "100%")
+
+# Packages
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(fixest)
+library(modelsummary)
+library(latex2exp)
+library(kableExtra)
+
+# Plotting
+cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
+shapes <- c(0, 1, 2, 5, 6)
+
+# File Paths
+# TODO for replication: change paths
+# local paths for development
+#data_dir <- "~/Projects/SEHTestACS/data/"
+#results_dir <- "../results/"
+# paths at HELIX HPC
+data_dir <- "./data/"
+results_dir <- "./results/"
+
+# Data
+pums <- read_parquet(paste0(data_dir, "pums_analysis.parquet")) |>
+  mutate(year = as.integer(YEAR),
+         # race_eth: nhwhite as reference category
+         race_eth = factor(race_eth, levels = c("nhwhite", "nhblack", "hispanic", "nhother"))
+         )
+
+acs <- read_parquet(paste0(data_dir, "acs_metro.parquet"))
+
+metro_vars <- read_parquet(paste0(data_dir, "metro_vars.parquet"))
+```
+
+```{r tenure_fd_prep, include=FALSE}
+metro_vars_fd <- metro_vars |>
+  arrange(metro_area, year) |>
+  group_by(metro_area) |>
+  mutate(
+    d_gini_inc     = gini_inc_metro - lag(gini_inc_metro),
+    d_H_bw         = H_bw          - lag(H_bw),
+    d_H_race_multi = H_race_multi   - lag(H_race_multi),
+    d_unemp        = unemp_rate_metro - lag(unemp_rate_metro),
+    d_vacancy      = vacancy_rate_metro - lag(vacancy_rate_metro),
+    d_pct_renter   = pct_renter_metro   - lag(pct_renter_metro),
+    d_H_tenure     = H_tenure - lag(H_tenure),
+    H_inc_lag      = lag(H_inc),
+    H_tenure_lag   = lag(H_tenure),
+    pop_growth_metro = pop_growth_metro
+  ) |>
+  ungroup() |>
+  filter(!is.na(d_gini_inc)) |>
+  mutate(H_inc_lag_c = H_inc_lag - mean(H_inc_lag, na.rm = TRUE))
+```
+
+
+# Segregation Moderates Income Inequality → Tenure Segregation
+
+The ABM does not model tenure explicitly, but the investment mechanism directly implies a tenure prediction. When income inequality rises, high-income households gain purchasing power relative to low-income ones. In a segregated metro, this income gain concentrates in already-wealthy neighbourhoods: landlords there invest more, housing quality rises further, and the neighbourhood becomes increasingly attractive to owner-occupiers who capitalise future quality gains into purchase prices. At the bottom, disinvestment deepens and the stock remains or shifts toward rental. The prediction is therefore:
+
+> In more segregated cities, a rise in income inequality translates into a larger rise in tenure segregation (spatial separation of owners and renters).
+
+The FD design mirrors the housing cost inequality model exactly: $\Delta$Tenure Segregation $H$ is regressed on $\Delta$Income Gini interacted with lagged income segregation $H^R_{m,t-5}$. Controls absorb concurrent shifts in racial segregation, labour market conditions, overall vacancy rates, renter share, and population growth. The renter share is included to net out any mechanical relationship between the aggregate tenure composition and its spatial unevenness.
+
+```{r tenure_seg_fd}
+tfd_coef_names <- c(
+  "d_gini_inc"             = "\u0394Income Gini",
+  "H_inc_lag_c"            = "Income Segregation H\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_inc_lag_c" = "\u0394Income Gini \u00d7 H\u1d3f (t\u22125)",
+  "d_H_bw"                 = "\u0394Black-White Segregation H",
+  "d_unemp"                = "\u0394Unemployment Rate",
+  "d_vacancy"              = "\u0394Vacancy Rate",
+  "d_pct_renter"           = "\u0394Renter Share",
+  "pop_growth_metro"       = "Population Growth"
+)
+
+tfd1  <- feols(d_H_tenure ~ d_gini_inc                                                                               | year,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd2  <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c                                                                 | year,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd3  <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c + d_H_bw + d_unemp + d_vacancy + d_pct_renter + pop_growth_metro | year,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd1r <- feols(d_H_tenure ~ d_gini_inc                                                                               | year + census_division,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd2r <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c                                                                 | year + census_division,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd3r <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c + d_H_bw + d_unemp + d_vacancy + d_pct_renter + pop_growth_metro | year + census_division,
+               data = metro_vars_fd, cluster = ~metro_area)
+
+modelsummary(
+  list(tfd1, tfd1r, tfd2, tfd2r, tfd3, tfd3r),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = tfd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  output      = "html"
+)
+```
+
+### Predicted Values
+
+Predicted $\Delta$Tenure Segregation $H$ as a function of $\Delta$Income Gini at three levels of lagged income segregation. All other predictors held at zero. Year FE absorbed.
+
+```{r tenure_seg_fd_pred, fig.height=4}
+h_sd     <- sd(metro_vars_fd$H_inc_lag_c, na.rm = TRUE)
+x_seq    <- seq(min(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                max(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                length.out = 100)
+h_mn_lag <- mean(metro_vars_fd$H_inc_lag, na.rm = TRUE)
+h_levels <- c(-h_sd, 0, h_sd)
+h_labels <- sprintf(c("Low ($-$1 SD, $%.3f$)",
+                       "Mean ($%.3f$)",
+                       "High ($+$1 SD, $%.3f$)"),
+                    h_levels + h_mn_lag)
+
+b_tfd <- coef(tfd3r)
+V_tfd <- vcov(tfd3r)[c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c"),
+                      c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c")]
+
+expand.grid(d_gini_inc = x_seq, H_inc_lag_c = h_levels) |>
+  mutate(
+    H_label = factor(H_inc_lag_c, levels = h_levels, labels = h_labels),
+    y_hat   = b_tfd["d_gini_inc"]             * d_gini_inc
+            + b_tfd["H_inc_lag_c"]            * H_inc_lag_c
+            + b_tfd["d_gini_inc:H_inc_lag_c"] * d_gini_inc * H_inc_lag_c,
+    se      = mapply(function(x, h) {
+                z <- c(x, h, x * h)
+                sqrt(as.numeric(z %*% V_tfd %*% z))
+              }, d_gini_inc, H_inc_lag_c),
+    ylo     = y_hat - 1.96 * se,
+    yhi     = y_hat + 1.96 * se
+  ) |>
+  ggplot(aes(x = d_gini_inc, colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  labs(
+    x = TeX("$\\Delta$ Income Gini"),
+    y = TeX("$\\Delta$ Tenure Segregation $H$")
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "tenure_seg_fd.pdf"), height = 12, width = 18, units = "cm")
+```
+
+# References

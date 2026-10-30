@@ -1,0 +1,414 @@
+---
+title: "A Socio-Economic Model of Residential Segregation, Neighborhood Change and Housing Inequality"
+subtitle: "Empirical Analysis: H3 — Segregation Moderates Neighborhood Income → Vacancy Rate"
+author: "Malte Grönemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error   = FALSE,
+                      out.width = "100%")
+
+# Packages
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(fixest)
+library(modelsummary)
+library(latex2exp)
+library(kableExtra)
+
+# Plotting
+cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
+shapes <- c(0, 1, 2, 5, 6)
+
+# File Paths
+# TODO for replication: change paths
+# local paths for development
+#data_dir <- "~/Projects/SEHTestACS/data/"
+#results_dir <- "../results/"
+# paths at HELIX HPC
+data_dir <- "./data/"
+results_dir <- "./results/"
+
+# Data
+pums <- read_parquet(paste0(data_dir, "pums_analysis.parquet")) |>
+  mutate(year = as.integer(YEAR),
+         # race_eth: nhwhite as reference category
+         race_eth = factor(race_eth, levels = c("nhwhite", "nhblack", "hispanic", "nhother"))
+         )
+
+acs <- read_parquet(paste0(data_dir, "acs_metro.parquet"))
+
+metro_vars <- read_parquet(paste0(data_dir, "metro_vars.parquet"))
+```
+
+
+# Segregation Moderates Median Neighborhood Income → Vacancy Rate
+
+> In more segregated cities, the negative relationship between neighbourhood income and vacancy rates is stronger.
+
+In any self-organised segregation model, higher income segregation implies greater dispersion in neighbourhood attractiveness: neighbourhoods are more unequal, so the income–vacancy gradient should be steeper. This is a necessary implication of Schelling-type sorting mechanisms in general, not a distinctive prediction of this ABM. The test reported here therefore functions as a basic validation — the ABM must pass it, but passing it does not distinguish it from simpler models. I test this as a cross-level interaction at the tract level: tract vacancy rate is regressed on a tract income measure, the city-level income segregation index, and their interaction. Tracts are weighted by the number of housing units. Standard errors are clustered by CBSA.
+
+The main income predictor is the log ratio of tract median household income (`B19013`) to city median household income: $\ln(\text{tract median} / \text{city median})$. A value of zero means the tract is exactly at the city median; negative values indicate below-average tracts, positive values above-average tracts. This operationalisation captures within-city relative standing directly, making the variable comparable across cities without requiring city median income as a separate control. Using log absolute income with city median as an additive control would implicitly estimate the same within-city deviation but without constraining the city median coefficient to equal $-1$; expressing the ratio explicitly imposes that constraint and makes the variable's meaning transparent. The same absolute income gap means something different in cities with different overall income levels, so the ratio is the natural scale for the ABM mechanism, which concerns sorting *within* a local housing market. Year fixed effects absorb inter-wave aggregate income growth, so the cross-sectional variation in the log ratio is effectively real within each wave.
+
+The expected signs follow directly from the hypothesis. The main effect of the log income ratio should be **negative**: tracts with higher income relative to their city face stronger housing demand and therefore lower vacancy rates. The interaction `log income ratio × H^R` should also be **negative**: the marginal effect of the income ratio on vacancy is $\beta_1 + \beta_3 \cdot H^R$, so a negative $\beta_3$ means the income–vacancy gradient steepens as segregation increases — consistent with the ABM mechanism in which segregation concentrates disinvestment in the lowest-income tracts.
+
+I estimate a linear probability model (LPM) via OLS. LPM coefficients are directly interpretable as marginal effects in percentage points, and the within-estimator is consistent under high-dimensional fixed effects without the incidental-parameters correction that nonlinear GLMs require. A logit specification is reported as a robustness check below.
+
+Two fixed-effects specifications are estimated. The census-division specification (year + nine Census divisions) absorbs broad regional differences in baseline vacancy levels and housing market structure, with identification coming from cross-metro variation within regions. The CBSA specification (year + metro area) absorbs all time-constant city-level differences; the interaction `log income ratio × H^R` is then identified purely from within-metro over-time variation in the segregation index across the four ACS waves. The CBSA specification is the more demanding, but with only four waves and $H^R$ moving slowly over time, within-metro variance is limited and the census-division specification carries more power. Standard errors are clustered by CBSA.
+
+The hypothesis does not posit a causal effect of income on vacancy. Instead, both are treated as joint consequences of latent neighbourhood attractiveness: attractive neighbourhoods attract wealthier residents and face stronger housing demand, yielding lower vacancy rates. Any segregation model predicts that this co-variation is steeper in more segregated cities, where neighbourhood attractiveness is more dispersed. Controlling for observable proxies of attractiveness — amenities, distance to the CBD, housing stock quality — would therefore be controlling away the mechanism, producing a bad-control bias that attenuates the gradient we aim to document. Tract-level controls of this kind are accordingly excluded on theoretical grounds, not for lack of data.
+
+The main remaining concern is city-level confounding: shocks that shift the income–vacancy relationship across waves independently of segregation. Zoning and regulatory constraints could in principle generate an income–vacancy correlation (exclusionary zoning raises both incomes and barriers to new supply), but zoning changes extremely slowly over time and is largely absorbed by metro area or census-division FE. Time-varying metro-level controls are therefore the only necessary adjustment: income inequality (Gini) captures the spread of the within-city income distribution — a tract 20% below the city median occupies a very different relative position in a high-inequality city than in a low-inequality one, so Gini is needed even after conditioning on the ratio; Black–White segregation ($H_{bw}$) separates the effect of income segregation from concurrent racial segregation, relevant because a dual housing market by race can generate vacancies in tracts that are unavailable to potential residents of a different race regardless of income; unemployment rate, population growth, and overall vacancy rate capture demand-side market tightness, which compresses the gradient in supply-constrained markets (see robustness check below).
+
+```{r vac_conc_prep}
+# City-level weighted mean of log home value (for ratio variable, parallel to log_median_inc_metro)
+val_metro <- acs |>
+  group_by(metro_area, year) |>
+  summarise(log_median_val_metro = weighted.mean(log(ifelse(median_val > 0, median_val, NA_real_)),
+                                                  units_tot, na.rm = TRUE),
+            .groups = "drop")
+
+acs_vac <- acs |>
+  filter(!is.na(log_median_inc), !is.na(vac_rate), units_tot > 0) |>
+  left_join(metro_vars |> select(metro_area, year,
+                            H_inc, H_val, H_rent,
+                            log_median_inc_metro,
+                            gini_inc_metro, H_bw,
+                            unemp_rate_metro, vacancy_rate_metro, pop_growth_metro,
+                            census_division),
+            by = c("metro_area", "year")) |>
+  left_join(val_metro, by = c("metro_area", "year")) |>
+  mutate(
+    log_inc_ratio = log_median_inc - log_median_inc_metro,
+    log_val_ratio = log(ifelse(median_val > 0, median_val, NA_real_)) - log_median_val_metro
+  )
+```
+
+```{r vac_conc_models}
+vc_controls <- ~ gini_inc_metro + H_bw +
+                  unemp_rate_metro + vacancy_rate_metro + pop_growth_metro
+
+vc1_rfe <- feols(vac_rate ~ log_inc_ratio                          | year + census_division,
+                 data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc2_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc                  | year + census_division,
+                 data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc3_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls] | year + census_division,
+                 data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc1 <- feols(vac_rate ~ log_inc_ratio                          | year + metro_area,
+             data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc2 <- feols(vac_rate ~ log_inc_ratio * H_inc                  | year + metro_area,
+             data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc3 <- feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls] | year + metro_area,
+             data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_coef_names <- c(
+  "log_inc_ratio"        = "Log Income Ratio (Tract/City)",
+  "H_inc"                = "Income Segregation H\u1d3f",
+  "log_inc_ratio:H_inc"  = "Log Income Ratio \u00d7 H\u1d3f",
+  "gini_inc_metro"       = "Income Gini",
+  "H_bw"                 = "Black-White Segregation H",
+  "unemp_rate_metro"     = "Unemployment Rate",
+  "vacancy_rate_metro"   = "Overall Vacancy Rate",
+  "pop_growth_metro"     = "Population Growth"
+)
+
+modelsummary(
+  list(vc1_rfe, vc1, vc2_rfe, vc2, vc3_rfe, vc3),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared", "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+```{r vac_conc_plot}
+b_vc  <- coef(vc3)
+V_vc  <- vcov(vc3)
+
+x_seq    <- seq(quantile(acs_vac$log_inc_ratio, 0.01, na.rm = TRUE),
+                quantile(acs_vac$log_inc_ratio, 0.99, na.rm = TRUE),
+                length.out = 100)
+h_mn_vc  <- weighted.mean(acs_vac$H_inc,             acs_vac$units_tot, na.rm = TRUE)
+h_sd_vc  <- sd(acs_vac$H_inc, na.rm = TRUE)
+h_levels_vc <- h_mn_vc + c(-h_sd_vc, 0, h_sd_vc)
+h_labels_vc <- sprintf(c("Low ($-$1 SD, $%.3f$)",
+                          "Mean ($%.3f$)",
+                          "High ($+$1 SD, $%.3f$)"),
+                        h_levels_vc)
+
+newdata_vc <- expand.grid(
+  log_inc_ratio      = x_seq,
+  H_inc              = h_levels_vc,
+  gini_inc_metro     = weighted.mean(acs_vac$gini_inc_metro,     acs_vac$units_tot, na.rm = TRUE),
+  H_bw               = weighted.mean(acs_vac$H_bw,               acs_vac$units_tot, na.rm = TRUE),
+  unemp_rate_metro   = weighted.mean(acs_vac$unemp_rate_metro,   acs_vac$units_tot, na.rm = TRUE),
+  vacancy_rate_metro = weighted.mean(acs_vac$vacancy_rate_metro, acs_vac$units_tot, na.rm = TRUE),
+  pop_growth_metro   = weighted.mean(acs_vac$pop_growth_metro,   acs_vac$units_tot, na.rm = TRUE),
+  year               = as.integer(names(which.max(table(acs_vac$year)))),
+  metro_area         = names(which.max(table(acs_vac$metro_area)))
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels_vc, labels = h_labels_vc))
+
+key_vars_vc <- c("log_inc_ratio", "H_inc", "log_inc_ratio:H_inc")
+V_vc_key    <- V_vc[key_vars_vc, key_vars_vc]
+
+newdata_vc <- newdata_vc |>
+  mutate(
+    y_hat = predict(vc3, newdata = newdata_vc),
+    se_p  = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_vc_key %*% z))
+            }, log_inc_ratio, H_inc),
+    ylo   = y_hat - 1.96 * se_p,
+    yhi   = y_hat + 1.96 * se_p
+  )
+
+ggplot(newdata_vc, aes(x = exp(log_inc_ratio),
+                       colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels_vc, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels_vc, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels_vc, TeX)) +
+  scale_x_continuous(labels = scales::label_percent()) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Tract Income as Share of City Median",
+    y = "Predicted Vacancy Rate"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "vac_income_seg.pdf"), height = 12, width = 18, units = "cm")
+```
+
+## Income Composition and Housing Quality as Dual Attractiveness Channels
+
+Neighbourhood attractiveness in the ABM has two components: who lives there (income composition) and the quality of the housing stock (driven by the investment cycle). The previous section established that income composition — measured by the log tract-to-city income ratio — shows the predicted gradient moderation. Here I test whether housing quality, measured by the log ratio of tract to city median home value ($\ln(\text{tract median value} / \text{city median value})$), shows the same pattern, and whether both channels operate jointly.
+
+Note that `B25077` (median home value) is reported only for owner-occupied units; tracts with no owner-occupied housing have missing values and are excluded from these models. Tracts with valid home values are a selected sample, and the estimates should be interpreted accordingly.
+
+The expected signs mirror those from the first subsection. The main effect of the log home value ratio should be **negative**: tracts with higher home values relative to their city reflect stronger investment and demand, yielding lower vacancy rates. The interaction `log value ratio × H^R` should also be **negative**: more segregated cities produce steeper home value gradients, concentrating disinvestment and vacancy in the lowest-value tracts. Both interactions in model (5) are therefore expected to be negative.
+
+Five specifications are estimated in sequence. Models (1) and (2) establish the additive and tract-level interactive effects of the two ratio variables before introducing the city-level moderator. Models (3) and (4) add the cross-level interaction of income segregation with each ratio in turn. Model (5) is the joint specification with both cross-level interactions, directly testing whether income composition and housing quality are each independently moderated by income segregation. All specifications include the full set of metro-level controls and are estimated with both census-division and metro area fixed effects.
+
+```{r vac_val_models}
+vc_val_coef_names <- c(
+  "log_inc_ratio"               = "Log Income Ratio (Tract/City)",
+  "log_val_ratio"               = "Log Value Ratio (Tract/City)",
+  "H_inc"                       = "Income Segregation H\u1d3f",
+  "log_inc_ratio:log_val_ratio" = "Log Income Ratio \u00d7 Log Value Ratio",
+  "log_inc_ratio:H_inc"         = "Log Income Ratio \u00d7 H\u1d3f",
+  "log_val_ratio:H_inc"         = "Log Value Ratio \u00d7 H\u1d3f",
+  "gini_inc_metro"              = "Income Gini",
+  "H_bw"                        = "Black-White Segregation H",
+  "unemp_rate_metro"            = "Unemployment Rate",
+  "vacancy_rate_metro"          = "Overall Vacancy Rate",
+  "pop_growth_metro"            = "Population Growth"
+)
+
+vc_v1_rfe <- feols(vac_rate ~ log_inc_ratio + log_val_ratio + .[vc_controls]                   | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v1     <- feols(vac_rate ~ log_inc_ratio + log_val_ratio + .[vc_controls]                   | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v2_rfe <- feols(vac_rate ~ log_inc_ratio * log_val_ratio + .[vc_controls]                   | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v2     <- feols(vac_rate ~ log_inc_ratio * log_val_ratio + .[vc_controls]                   | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v3_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio + .[vc_controls]           | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v3     <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio + .[vc_controls]           | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v4_rfe <- feols(vac_rate ~ log_inc_ratio + log_val_ratio * H_inc + .[vc_controls]           | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v4     <- feols(vac_rate ~ log_inc_ratio + log_val_ratio * H_inc + .[vc_controls]           | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v5_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls]  | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v5     <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls]  | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+modelsummary(
+  list(
+    "(1) Div FE"   = vc_v1_rfe, "(1) Metro FE" = vc_v1,
+    "(2) Div FE"   = vc_v2_rfe, "(2) Metro FE" = vc_v2,
+    "(3) Div FE"   = vc_v3_rfe, "(3) Metro FE" = vc_v3,
+    "(4) Div FE"   = vc_v4_rfe, "(4) Metro FE" = vc_v4,
+    "(5) Div FE"   = vc_v5_rfe, "(5) Metro FE" = vc_v5
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_val_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared", "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+## Robustness: Value and Rent Segregation as Alternative Moderators
+
+The joint model above uses income segregation ($H^R_\text{inc}$) as the city-level moderator for both the income and home value ratio. $H^R_\text{val}$ and $H^R_\text{rent}$ are alternative operationalisations of the segregation moderator: they tend to have higher levels and variance than $H^R_\text{inc}$, which may improve statistical power. However, value and rent segregation are themselves outcomes of the housing market — they are downstream of the sorting and investment processes the ABM models — so using them as moderators risks endogeneity. These are alternative operationalisations rather than independent robustness tests. The structure of the models mirrors model (5) from the previous section; only the segregation moderator changes.
+
+```{r vac_conc_robseg}
+vc_rob_coef_names <- c(
+  "log_inc_ratio"               = "Log Income Ratio (Tract/City)",
+  "log_val_ratio"               = "Log Value Ratio (Tract/City)",
+  "H_inc"                       = "Income Segregation H\u1d3f",
+  "H_val"                       = "Home-Value Segregation H\u1d3f\u1d5b\u1d43\u1d4d",
+  "H_rent"                      = "Gross-Rent Segregation H\u1d3f\u1d63\u1d49\u207f\u1d57",
+  "log_inc_ratio:H_inc"         = "Log Income Ratio \u00d7 H\u1d3f",
+  "log_val_ratio:H_inc"         = "Log Value Ratio \u00d7 H\u1d3f",
+  "log_inc_ratio:H_val"         = "Log Income Ratio \u00d7 H\u1d3f\u1d5b\u1d43\u1d4d",
+  "log_val_ratio:H_val"         = "Log Value Ratio \u00d7 H\u1d3f\u1d5b\u1d43\u1d4d",
+  "log_inc_ratio:H_rent"        = "Log Income Ratio \u00d7 H\u1d3f\u1d63\u1d49\u207f\u1d57",
+  "log_val_ratio:H_rent"        = "Log Value Ratio \u00d7 H\u1d3f\u1d63\u1d49\u207f\u1d57",
+  "gini_inc_metro"              = "Income Gini",
+  "H_bw"                        = "Black-White Segregation H",
+  "unemp_rate_metro"            = "Unemployment Rate",
+  "vacancy_rate_metro"          = "Overall Vacancy Rate",
+  "pop_growth_metro"            = "Population Growth"
+)
+
+modelsummary(
+  list(
+    "(1) H\u1d3f\u1d47\u207f\u1d9c, Div FE"   = vc_v5_rfe,
+    "(1) H\u1d3f\u1d47\u207f\u1d9c, Metro FE" = vc_v5,
+    "(2) H\u1d3f\u1d5b\u1d43\u1d4d, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_val + log_val_ratio * H_val + .[vc_controls] | year + census_division,
+                                                        data = acs_vac, weights = ~units_tot, cluster = ~metro_area),
+    "(2) H\u1d3f\u1d5b\u1d43\u1d4d, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_val + log_val_ratio * H_val + .[vc_controls] | year + metro_area,
+                                                        data = acs_vac, weights = ~units_tot, cluster = ~metro_area),
+    "(3) H\u1d3f\u1d63\u1d49\u207f\u1d57, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_rent + log_val_ratio * H_rent + .[vc_controls] | year + census_division,
+                                                              data = acs_vac, weights = ~units_tot, cluster = ~metro_area),
+    "(3) H\u1d3f\u1d63\u1d49\u207f\u1d57, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_rent + log_val_ratio * H_rent + .[vc_controls] | year + metro_area,
+                                                              data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_rob_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared", "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+## TODO: Spatial Robustness Checks
+
+Within-metro spatial autocorrelation in tract vacancy rates is plausible — disinvestment and abandonment spread across adjacent tracts and omitted local amenities affect clusters of tracts simultaneously. CBSA FE removes between-metro spatial clustering, but within-metro residual dependence may remain. Three approaches to address this, in increasing order of complexity:
+
+1. **Conley standard errors** (`fixest::vcov_conley()`): correct SEs for spatial autocorrelation up to a distance cutoff without changing the estimator or model structure. Compatible with `feols`. Centroid coordinates are available in `acs_metro_geo.parquet`. Most practical first step.
+
+2. **Spatial lag as control**: pre-compute the queen-contiguity weighted average of neighbouring tracts' log income or vacancy rate (within-metro only, using `spdep::poly2nb()` on tract polygons from `acs_metro_geo.parquet`) and add it as a covariate. Keeps the existing `feols` framework intact.
+
+3. **Spatial error model**: add a spatial error correction (`spatialreg::errorsarlm()`) as a further robustness check to assess whether spatial dependence drives the interaction estimate.
+
+Note: weights matrix should be built within each metro separately to avoid creating spurious neighbours across CBSA boundaries.
+
+
+
+## Robustness: Logit Link Function
+
+The main specifications use OLS (LPM). As a robustness check, the full-controls models from both subsections are re-estimated with a logit link (`feglm`, `family = binomial(link = "logit")`). Because vacancy rates are concentrated in the 2–15 % range, far from both boundaries, the logit marginal effects and the LPM coefficients are near-identical in the observed range, and the interaction sign and significance are unchanged.
+
+```{r vac_conc_logit}
+vc3_rfe_logit  <- feglm(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + census_division,
+                         data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                         family = binomial(link = "logit"))
+vc3_fe_logit   <- feglm(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + metro_area,
+                         data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                         family = binomial(link = "logit"))
+
+vc_v5_rfe_logit <- feglm(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + census_division,
+                          data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                          family = binomial(link = "logit"))
+vc_v5_fe_logit  <- feglm(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + metro_area,
+                          data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                          family = binomial(link = "logit"))
+
+modelsummary(
+  list(
+    "(1) Inc only, Div FE"   = vc3_rfe_logit,
+    "(2) Inc only, Metro FE" = vc3_fe_logit,
+    "(3) Joint, Div FE"      = vc_v5_rfe_logit,
+    "(4) Joint, Metro FE"    = vc_v5_fe_logit
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_val_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared",
+                  "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+
+## Robustness: High-Vacancy Markets Only
+
+The ABM mechanism requires housing market slack: in tight markets, vacancy is suppressed uniformly across neighbourhoods regardless of income or segregation, compressing the income–vacancy gradient mechanically. The full-sample estimate therefore understates the effect in markets where the mechanism can actually operate. This is an explicit scope condition of the ABM, not a limitation of the test.
+
+To verify that the interactions are concentrated where the theory predicts, the full-controls models from both subsections are re-estimated on the subsample of metros with an above-median overall vacancy rate in each wave (i.e. `vacancy_rate_metro` above the wave-specific cross-metro median). This retains metros with genuine housing market slack and excludes tight markets — particularly the large coastal metros facing supply shortages in the 2019 and 2024 waves — where the mechanism is suppressed. If the interactions are larger in magnitude and more precisely estimated in this subsample, that confirms the effect is driven by markets where household sorting can express itself as differential vacancy rather than being compressed by supply constraints.
+
+```{r vac_conc_slack}
+# Wave-specific median vacancy rate across metros
+vac_median_by_year <- acs_vac |>
+  distinct(metro_area, year, vacancy_rate_metro) |>
+  group_by(year) |>
+  mutate(vac_median = median(vacancy_rate_metro, na.rm = TRUE)) |>
+  ungroup() |>
+  select(metro_area, year, vac_median)
+
+acs_vac_slack <- acs_vac |>
+  left_join(vac_median_by_year, by = c("metro_area", "year")) |>
+  filter(vacancy_rate_metro > vac_median)
+
+modelsummary(
+  list(
+    "(1) Inc, Full, Div FE"    = vc3_rfe,
+    "(2) Inc, Slack, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + census_division,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area),
+    "(3) Inc, Full, Metro FE"  = vc3,
+    "(4) Inc, Slack, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + metro_area,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area),
+    "(5) Jnt, Full, Div FE"    = vc_v5_rfe,
+    "(6) Jnt, Slack, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + census_division,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area),
+    "(7) Jnt, Full, Metro FE"  = vc_v5,
+    "(8) Jnt, Slack, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + metro_area,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_val_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared",
+                  "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+# References

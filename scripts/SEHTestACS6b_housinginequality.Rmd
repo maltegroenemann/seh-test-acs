@@ -1,0 +1,759 @@
+---
+title: "Testing the ABM using the ACS"
+subtitle: "H2: Segregation Moderates the Effect of Income Inequality on Housing Inequality"
+author: "Malte Grönemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error   = FALSE,
+                      out.width = "100%")
+
+# Packages
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(fixest)
+library(modelsummary)
+library(latex2exp)
+library(kableExtra)
+library(sf)
+library(geoarrow)
+library(tigris)
+options(tigris_use_cache = TRUE)
+
+# Plotting
+cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
+shapes <- c(0, 1, 2, 5, 6)
+
+# File Paths
+# TODO for replication: change paths
+# local paths for development
+#data_dir <- "~/Projects/SEHTestACS/data/"
+#results_dir <- "../results/"
+# paths at HELIX HPC
+data_dir <- "./data/"
+results_dir <- "./results/"
+
+# Data
+metro_vars <- read_parquet(paste0(data_dir, "metro_vars.parquet"))
+metro_vars_geo <- read_parquet(paste0(data_dir, "metro_vars_geo.parquet"), as_data_frame = FALSE) |>
+  st_as_sf()
+
+us_states <- states(cb = TRUE, year = 2020) |>
+  filter(!STUSPS %in% c("AK", "HI", "PR", "VI", "GU", "AS", "MP")) |>
+  st_transform(4326)
+```
+
+
+The second city-level hypothesis tests whether residential segregation moderates the relationship between income inequality and housing cost inequality. High income inequality alone does not mechanically produce dispersed rents and home values: landlords base investment decisions on local neighborhood conditions rather than city-wide income distributions, so the link from income inequality to housing inequality runs through the spatial sorting of households into neighborhoods with different average incomes. While it is straightforward that a larger spread of incomes in a city results in a wider spread of housing quality and prices, my model motivates the new hypothesis that this relationship is moderated by residential segregation. I therefore test the following interaction:
+
+> In more segregated cities, income inequality translates more strongly into inequality in rents and home values.
+
+I therefore expect a **positive** effect of income inequality on housing cost inequality and a **positive** interaction effect with income segregation.
+
+I derive this hypothesis from the city-level inequality analysis in Part IIIb of the hypotheses experiment. In the simulation, the moderating effect of segregation appears clearly when housing quality is the dependent variable, but not when rent is the dependent variable. This is by design: in the model, rent is monotone in a unit's utility rank, so its scale is determined entirely by the income distribution and cardinal differences in unit quality never enter rent — only their ordering does. In empirical data, cardinal quality differences are capitalized into rents, so I expect the interaction to emerge with rents and home values as proxies of housing quality.
+
+
+# Operationalization of Housing Quality Inequality
+
+Housing quality is a multi-dimensional construct, even if the ABM represents it as a single variable. In reality, quality depends on a variety of unit attributes: floor size, number of rooms, appliances and infrastructure, building age and style, and amenities such as a balcony, garden, or fireplace. What constitutes a quality home also varies across households. Rather than constructing an index from such attributes, I use market prices as a proxy. Following the logic of hedonic pricing (Rosen 1974), prices aggregate the value households attach to a unit's full bundle of attributes (Chau and Chin 2003; Sirmans et al. 2005).
+
+I measure housing cost inequality with a Gini coefficient computed from housing costs pooled across renters and owners within each metro area × year in the PUMS data. Pooling both tenure groups is necessary to capture two distinct dimensions simultaneously: *within-tenure* inequality (the spread of rents among renters, or of values among owners) and the *between-group* gap (the cost difference between renting and owning). A within-tenure analysis would be biased if cities differ in their renter–owner split and if the quality of rental and owner-occupied stock diverges. Because the ABM predicts that segregation translates income inequality into housing inequality by sorting households into neighbourhoods of varying desirability regardless of tenure, the dependent variable should reflect the full cross-tenure distribution of housing costs.
+
+The central measurement challenge is that renters and owners face prices on incompatible scales: monthly contract rent for renters and total market value for owners. I exclude utility costs from both measures, as utility expenditure is a mixed signal — higher water and energy costs can reflect either a larger or better-equipped home or poor insulation, making them an unreliable proxy for quality. I convert home values to monthly user costs using the metro-level rent-to-price ratio as the capitalization rate. This is a common approximation in the empirical literature on housing costs (Himmelberg, Mayer, and Sinai 2005; Davis, Lehnert, and Martin 2008):
+
+$$u_i = v_i \times \hat{r}_{mt} \;/\; 12,$$
+
+where $v_i$ is the inflation-adjusted home value (`valueh_real`, 1999 USD) and $\hat{r}_{mt}$ is a metro- and wave-specific capitalization rate.
+
+The underlying logic is that in equilibrium a marginal household is indifferent between renting and owning, so the annual rent for a unit equals its owner's user cost: home value $P$ times a cap rate $r$. The cap rate summarizes the net annual cost of owning per dollar of value — forgone returns on tied-up capital, property taxes, maintenance and depreciation, and a risk premium, less expected appreciation and any tax advantages.
+
+Because it is rarely possible to observe both the rent and the value of the same unit simultaneously, I estimate the cap rate from metro-level medians. Cross-metro variation in $\hat{r}$ is meaningful: the rent-to-price ratio is systematically lower in supply-constrained metros, and I preserve that variation by estimating a cap rate for every metro area in every ACS wave from PUMS weighted median rents and home values (household weight HHWT):
+
+$$\hat{r}_{mt} = 12 \;\times\; \widetilde{\mathrm{rent}}_{mt} \;/\; \widetilde{\mathrm{value}}_{mt}.$$
+
+The factor of 12 follows from the real-estate definition of the annual gross yield: $r = \text{annual rent} / \text{value} = 12 \times \text{monthly rent} / \text{value}$. Dividing by 12 in the user-cost formula then recovers a monthly figure, so the two factors cancel and the imputed cost simplifies to
+
+$$u_i = v_i \times \widetilde{\mathrm{rent}}_{mt} / \widetilde{\mathrm{value}}_{mt}.$$
+
+**Key assumption.** The formula embeds the assumption that the unit with median rent would sell for the median price, and that this relationship holds proportionally across the full within-metro quality distribution: a home worth twice the median is assumed to rent for twice the median rent. This is unlikely to hold exactly. Not only does the quality of the owner-occupied and rental stock differ, but luxury units also typically command a lower gross yield than entry-level units (the cap rate declines with quality), so the formula overstates imputed costs at the top of the value distribution and understates them at the bottom. The resulting Gini is therefore somewhat inflated relative to the true housing cost distribution. This bias cannot be eliminated without observing what owner-occupied units would rent for in the current market, which is not available in ACS or PUMS. The pooled monthly housing cost is then
+
+$$c_i = \begin{cases} \text{contract rent}_i & \text{renter} \\ v_i \times \hat{r}_{mt} \;/\; 12 & \text{owner,} \end{cases}$$
+
+where contract rent is deflated to 1999 USD using the CPI to ensure comparability across the four ACS waves. The housing cost inequality, my dependent variable, is the HHWT-weighted Gini of $c_i$ within each metro area × year.
+
+
+# Description of Key Variables
+
+Description of segregation indices can be found in the script for the first city-level hypothesis `SEHTestACS6a_housingseg.Rmd`.
+
+
+## Income Inequality
+
+
+```{r inc_gini_dens}
+metro_vars |>
+  mutate(year = factor(year)) |>
+  ggplot() +
+  aes(x = gini_inc_metro, fill = year, colour = year) +
+  geom_density(alpha = 0.3) +
+  labs(x = "Income Gini", y = "Density", fill = "Year", colour = "Year") +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+```{r map_gini_inc}
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = gini_inc_metro), colour = NA) +
+  scale_fill_viridis_b(name = "Gini", option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Inequality in Household Income by Metro Area (2024)") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+Income inequality in US cities varies considerably, with a minimum of `r round(min(metro_vars$gini_inc_metro, na.rm = T), 2)` and a maximum of `r round(max(metro_vars$gini_inc_metro, na.rm = T), 2)`. The average US city has an income inequality Gini index of `r round(mean(metro_vars$gini_inc_metro, na.rm = T), 2)`, a value close to the national average. The overall distribution of Gini indices is very similar over the four ACS waves, although a slight upward trend is visible.
+
+The metro areas with the highest levels of income inequality are around New York City, Los Angeles and Miami. High values also cluster in the South-East and California. Isolated, rural metro areas tend to have the lowest levels of income inequality. 
+
+```{r corrplot_gini}
+metro_vars |>
+  select(pop_metro, pop_growth_metro, pct_renter_metro, pct_college_metro, log_median_inc_metro, gini_inc_metro, unemp_rate_metro) |>
+  cor(use = "complete.obs") |>
+  ggcorrplot(type = "upper",
+             show.legend = F, lab = T) +
+  labs(title = "Correlation Matrix")
+```
+
+Larger metro areas by population tend to have a higher share of renters and college-educated residents, higher median incomes, and higher income inequality. The share of college-educated residents also correlates with higher population growth and particularly higher median incomes. A higher college share and higher median incomes also correlate with lower unemployment rates. In sum, large metros tend to be economically successful but also more unequal.
+
+## Housing Cost Inequality
+
+```{r gini_hist}
+metro_vars |>
+  filter(year == 2024) |>
+  select(metro_area, gini_rent_metro, gini_val_metro, gini_housing_metro) |>
+  pivot_longer(-metro_area,
+               names_to  = "dimension",
+               values_to = "value") |>
+  mutate(dimension = case_when(dimension == "gini_rent_metro"    ~ "Rent Gini",
+                               dimension == "gini_val_metro"     ~ "Home Value Gini",
+                               dimension == "gini_housing_metro" ~ "Housing Cost Gini")) |>
+  ggplot() +
+  aes(value, fill = dimension, colour = dimension) +
+  geom_density(alpha = 0.4) +
+  labs(x = NULL, y = "Density", colour = NULL, fill = NULL) +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+As the density plot shows, inequality in home values tends to be much higher and more varied than inequality in contract rent in US metros. Inequality in home values ranges from a minimum of `r round(min(metro_vars$gini_val_metro, na.rm = T), 2)` to a maximum of `r round(max(metro_vars$gini_val_metro, na.rm = T), 2)` with a mean of `r round(mean(metro_vars$gini_val_metro, na.rm = T), 2)`. In contrast, contract rent inequality has a minimum of `r round(min(metro_vars$gini_rent_metro, na.rm = T), 2)` and a maximum of `r round(max(metro_vars$gini_rent_metro, na.rm = T), 2)`. The average US city has a rent Gini index of `r round(mean(metro_vars$gini_rent_metro, na.rm = T), 2)`. Therefore, the combined housing cost Gini lies between the two but is influenced more strongly by home value inequality. It has a minimum of `r round(min(metro_vars$gini_housing_metro, na.rm = T), 2)` and a maximum of `r round(max(metro_vars$gini_housing_metro, na.rm = T), 2)` with a mean of `r round(mean(metro_vars$gini_housing_metro, na.rm = T), 2)`. Interestingly, the range of housing cost Gini indices is wider than that of income inequality but the average housing cost Gini is lower than the average income Gini.
+
+
+```{r}
+metro_vars |>
+  select(pop_metro, pct_renter_metro, pct_college_metro, log_median_inc_metro, gini_inc_metro, gini_rent_metro, gini_val_metro, gini_housing_metro) |>
+  cor(use = "complete.obs") |>
+  ggcorrplot(type = "upper",
+             show.legend = F, lab = T) +
+  labs(title = "Correlation Matrix")
+```
+
+The correlation analysis confirms that the combined housing cost Gini closely follows the home value Gini, with a correlation of 0.96. The rent Gini also correlates with the housing cost Gini with a correlation of 0.52. Inequality in rents and home values tends to go together, but they are distinct phenomena with a correlation of 0.39. Unsurprisingly, all measures of housing cost inequality have a substantial positive correlation with income inequality in a metro.
+
+Cities with high housing cost inequality have fewer renters, fewer college graduates, and lower median incomes on average; there is no relationship with population size. High housing cost inequality therefore appears to be independent of the high average housing costs that characterize economically successful cities.
+
+
+```{r gini_housing_dens}
+metro_vars |>
+  mutate(year = factor(year)) |>
+  ggplot() +
+  aes(x = gini_housing_metro, fill = year, colour = year) +
+  geom_density(alpha = 0.3) +
+  labs(x = "Housing Cost Gini", y = "Density", fill = "Year", colour = "Year") +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+The combined housing cost Gini is the dependent variable of the analysis. It pools renters and owners within each metro area × year after converting owner home values to monthly user costs via the metro-specific cap rate (see operationalization above). The pooled distribution captures both within-tenure inequality and the renter–owner cost gap. The density plot shows that the distribution of housing cost inequality in US cities remained similar across the four ACS waves, with a slight upward drift in recent years.
+
+```{r gini_housing_map}
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = gini_housing_metro), colour = NA) +
+  scale_fill_viridis_b(name = "Gini", option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Pooled Housing Cost Inequality by Metro Area (2024)") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+Consistent with the correlation analysis, housing cost inequality is independent of high median incomes and demographic variables, and the map does not show a consistent geographic picture. It tends to be higher in small metros in the South-East and in California and lower in the Pacific North-West, the North-East and the Midwest. The highest inequality in housing cost is observed in Show Low, Arizona.
+
+The scatter plots below, using 2024 data, confirm this pattern.
+
+
+```{r gini_housing_scatter}
+metro_vars |>
+  filter(year == 2024) |>
+  mutate(log_pop_metro = log(pop_metro)) |>
+  pivot_longer(cols = c(log_median_inc_metro, gini_inc_metro,
+                        log_pop_metro, pop_growth_metro),
+               names_to  = "predictor",
+               values_to = "x") |>
+  mutate(predictor = case_when(
+    predictor == "log_median_inc_metro" ~ "Log Median Income",
+    predictor == "gini_inc_metro"       ~ "Income Inequality (Gini)",
+    predictor == "log_pop_metro"        ~ "Log Population",
+    predictor == "pop_growth_metro"     ~ "Population Growth"
+  ),
+  predictor = factor(predictor, levels = c(
+    "Log Median Income", "Income Inequality (Gini)",
+    "Log Population", "Population Growth"
+  ))) |>
+  ggplot() +
+  aes(x = x, y = gini_housing_metro, colour = predictor) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~predictor, scales = "free_x") +
+  labs(x = NULL, y = "Housing Cost Gini", colour = NULL) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave(paste0(results_dir, "H2_gini_housing_scatter.pdf"), height = 12, width = 18, units = "cm")
+```
+
+
+## Period-to-Period Changes
+
+```{r metro_vars_fd, include=FALSE}
+metro_vars_fd <- metro_vars |>
+  arrange(metro_area, year) |>
+  group_by(metro_area) |>
+  mutate(
+    d_gini_housing      = gini_housing_metro      - lag(gini_housing_metro),
+    d_gini_housing_5pct = gini_housing_metro_5pct - lag(gini_housing_metro_5pct),
+    d_gini_housing_natl = gini_housing_metro_natl - lag(gini_housing_metro_natl),
+    d_gini_rent         = gini_rent_metro         - lag(gini_rent_metro),
+    d_gini_val          = gini_val_metro          - lag(gini_val_metro),
+    d_gini_inc          = gini_inc_metro          - lag(gini_inc_metro),
+    d_H_inc             = H_inc                   - lag(H_inc),
+    d_H_race_multi      = H_race_multi            - lag(H_race_multi),
+    d_unemp             = unemp_rate_metro        - lag(unemp_rate_metro),
+    d_vacancy           = vacancy_rate_metro      - lag(vacancy_rate_metro),
+    d_pct_renter        = pct_renter_metro        - lag(pct_renter_metro),
+    d_pct_hispanic      = pct_hispanic_metro      - lag(pct_hispanic_metro),
+    H_inc_lag           = lag(H_inc),
+    H_val_lag           = lag(H_val),
+    H_rent_lag          = lag(H_rent),
+    d_H_vac             = H_vac    - lag(H_vac),
+    H_vac_lag           = lag(H_vac),
+    d_H_tenure          = H_tenure - lag(H_tenure),
+    H_tenure_lag        = lag(H_tenure)
+  ) |>
+  ungroup() |>
+  filter(!is.na(d_gini_housing)) |>
+  mutate(
+    H_inc_lag_c    = H_inc_lag    - mean(H_inc_lag,    na.rm = TRUE),
+    H_val_lag_c    = H_val_lag    - mean(H_val_lag,    na.rm = TRUE),
+    H_rent_lag_c   = H_rent_lag   - mean(H_rent_lag,   na.rm = TRUE),
+    H_vac_lag_c    = H_vac_lag    - mean(H_vac_lag,    na.rm = TRUE),
+    H_tenure_lag_c = H_tenure_lag - mean(H_tenure_lag, na.rm = TRUE)
+  )
+```
+
+```{r fd_dens}
+metro_vars_fd |>
+  select(metro_area, year, d_gini_inc, d_gini_val, d_gini_rent, d_gini_housing) |>
+  pivot_longer(starts_with("d_gini_"),
+               names_to  = "dimension",
+               values_to = "delta") |>
+  mutate(
+    dimension = case_when(
+      dimension == "d_gini_inc"     ~ "\u0394 Income Gini",
+      dimension == "d_gini_val"     ~ "\u0394 Home Value Gini",
+      dimension == "d_gini_rent"    ~ "\u0394 Rent Gini",
+      dimension == "d_gini_housing" ~ "\u0394 Housing Cost Gini"
+    ),
+    year = factor(year)
+  ) |>
+  ggplot() +
+  aes(x = delta, fill = year, colour = year) +
+  geom_density(alpha = 0.3) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~dimension, scales = "free") +
+  labs(x = NULL, y = "Density", fill = "Period end", colour = "Period end") +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Income inequality in US metro areas changed little across the five-year inter-wave periods, although it appears to have increased slightly from 2009 to 2014. Housing cost inequality varied more, with the home value Gini showing larger changes than the rent Gini. Changes are small overall and are roughly centered on zero. The average change in the housing cost Gini is slightly positive from 2009 to 2014 and from 2019 to 2024, but slightly negative from 2014 to 2019.
+
+```{r fd_maps}
+fd_geo_2024 <- metro_vars_geo |>
+  filter(year == 2024) |>
+  left_join(
+    metro_vars_fd |>
+      filter(year == 2024) |>
+      select(metro_area, d_gini_inc, d_gini_housing),
+    by = "metro_area"
+  )
+
+ggplot(fd_geo_2024) +
+  geom_sf(data = us_states, fill = "grey75", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = d_gini_inc), colour = NA) +
+  scale_fill_gradient2(name = "\u0394 Gini", low = "#2166AC", mid = "white",
+                       high = "#B2182B", midpoint = 0, na.value = "grey60") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Change in Income Inequality by Metro Area (2019\u20132024)") +
+  theme_void() +
+  theme(legend.position = "right")
+
+ggplot(fd_geo_2024) +
+  geom_sf(data = us_states, fill = "grey75", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = d_gini_housing), colour = NA) +
+  scale_fill_gradient2(name = "\u0394 Gini", low = "#2166AC", mid = "white",
+                       high = "#B2182B", midpoint = 0, na.value = "grey60") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Change in Housing Cost Inequality by Metro Area (2019\u20132024)") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+While changes in income inequality are small and there does not seem to be a particular geographic pattern, housing cost inequality has increased in most metros, particularly in California and the North-East.
+
+
+# First-Differences Model
+
+The first-differences (FD) model tests whether a rise in income inequality translates into a larger rise in housing costs in more segregated cities, directly testing the dynamic mechanism by which segregation shapes how income inequality propagates through landlord and developer investment decisions.
+
+First-differencing removes all time-constant between-city heterogeneity without requiring unit fixed effects. Three design choices follow from the model. First, the dependent variable and main predictor are differenced ($\Delta$), but income segregation enters as its *lagged level* $H^R_{m,t-5}$: it is the structural context within which income inequality changes play out and is predetermined relative to $\Delta\text{GiniHousing}$. Second, all time-varying controls enter as period changes ($\Delta$) to match the estimand and absorb demand and economic shocks that could confound the interaction. Third, year fixed effects are retained as two dummies for the three inter-wave difference periods (2009-2014, 2014-2019, 2019-2024) to absorb national trends in housing costs. Standard errors are clustered by metro area only rather than two-way, because the FD sample contains only three period clusters. Income segregation $H^R_{m,t-5}$ is mean-centred so that the main effect of $\Delta\text{GiniInc}$ is evaluated at the average metro.
+
+Although first-differencing removes time-constant confounders, I need to account for alternative mechanisms that could generate the hypothesized pattern. For the interaction effect to be identified, both the independent variable and the moderator need to be conditionally exogenous (Nizalova and Murtazashvili 2016). Because the moderator is a lagged, predetermined level, reverse causality is not a concern for $H^R_{m,t-5}$; the residual threat is that the composition of income inequality growth differs systematically across high- and low-segregation metros in ways that also affect housing cost growth independently of the investment mechanism.
+
+I address this through three sets of controls. First, I include demand-side confounders: population growth captures compositional demand shocks from household inflows and outflows that simultaneously shift the income distribution and housing demand. Because such flows are disproportionately driven by Hispanic migration in the contemporary US (Rugh and Massey 2014), I also control for the change in Hispanic population share. Unemployment rate changes capture local economic cycles that affect both income levels and housing demand expectations.
+
+Second, I add the change in multigroup racial $H$ (Non-Hispanic White, Non-Hispanic Black, Hispanic, Non-Hispanic Other) to absorb racial residential dynamics that could independently affect neighbourhood price gradients. I do *not* include the change in income segregation ($\Delta H^R_{inc}$) in the main specification, even though it is a natural candidate for an alternative-channel control. Rising income inequality likely drives increases in income segregation (Reardon and Bischoff 2011; Yavas 2019), which in turn widens the spread of neighbourhood prices — the segregation-amplification channel. Excluding $\Delta H^R_{inc}$ would yield a purer estimate of the investment channel. However, the investment mechanism itself induces sorting: when housing costs become more dispersed across neighbourhoods, higher-income households sort into appreciating areas while lower-income households are confined to depreciating ones, raising income segregation as a *downstream consequence* of the very process under study. $\Delta H^R_{inc}$ therefore sits on the causal path from the mechanism to the outcome (or is jointly caused by both), making it a bad control: conditioning on it absorbs part of the effect being estimated rather than isolating a competing channel. The main specification therefore estimates the total moderation effect, investment and induced sorting combined. A model with $\Delta H^R_{inc}$ added is included in the robustness table (model 5) as a lower bound under the assumption that sorting precedes rather than follows housing cost changes within the period as movement of people are likely faster than investments into housing stock.
+
+Third, I include two further precautionary controls. The change in renter share accounts for the compositional structure of the pooled housing cost Gini: a shift in the renter–owner mix could mechanically alter the Gini even without any change in within-tenure inequality. The change in vacancy rate captures residual housing market slack not fully absorbed by population growth and unemployment.
+
+The full model therefore estimates the following equation for the change in housing cost inequality in metro area $m$ and period $t$:
+
+$$\Delta\text{GiniHousing}_{m,t} = \alpha + \beta_1\,\Delta\text{GiniInc}_{m,t} + \beta_2\,H^R_{m,t-5} + \beta_3\left(\Delta\text{GiniInc}_{m,t} \times H^R_{m,t-5}\right) + \boldsymbol{\gamma} \Delta\mathbf{X}_{m,t} + \tau_t + \varepsilon_{m,t}$$
+
+where $H^R_{m,t-5}$ is lagged income segregation (mean-centred across metros), $\Delta\mathbf{X}_{m,t}$ is the vector of first-differenced controls (population growth, $\Delta$ Hispanic share, $\Delta$ unemployment rate, $\Delta$ racial $H$, $\Delta$ renter share, $\Delta$ vacancy rate), and $\tau_t$ are year fixed effects.
+
+```{r housing_ineq_fd}
+fd_coef_names <- c(
+  "d_gini_inc"             = "\u0394Income Gini",
+  "H_inc_lag_c"            = "Income Segregation H\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_inc_lag_c" = "\u0394Income Gini \u00d7 H\u1d3f (t\u22125)",
+  "pop_growth_metro"       = "\u0394Population",
+  "d_unemp"                = "\u0394Unemployment Rate",
+  "d_pct_hispanic"         = "\u0394Hispanic Share",
+  "d_H_inc"                = "\u0394Income Segregation H\u1d3f",
+  "d_H_race_multi"         = "\u0394Multigroup Racial Segregation H",
+  "d_pct_renter"           = "\u0394Renter Share",
+  "d_vacancy"              = "\u0394Vacancy Rate"
+)
+
+cm_fd1 <- feols(d_gini_housing ~ d_gini_inc | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd2 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd3 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd4 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd5 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_inc + d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd6 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_inc + d_H_race_multi +
+                  d_pct_renter + d_vacancy | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+
+ms_args_fd <- list(
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  notes       = list("Standard errors clustered by metro area in parentheses.", "+ p < 0.1, * p < 0.05, ** p < 0.01, *** p < 0.001.")
+)
+
+models_fd <- list(cm_fd1, cm_fd2, cm_fd3, cm_fd4, cm_fd5, cm_fd6)
+
+do.call(modelsummary, c(list(models_fd, output = "html"),             ms_args_fd))
+do.call(modelsummary, c(list(models_fd, output = paste0(results_dir, "H2_seg_ineqFD.tex")), ms_args_fd))
+```
+
+The main effect of changes in income inequality ($\Delta$Income Gini) on changes in housing cost inequality is positive and highly significant. This relationship was expected: a rise in income inequality should lead to a rise in housing cost inequality as household budgets become more unequal and developers respond by producing housing of more varied quality that can be priced accordingly. The interaction between $\Delta$Income Gini and lagged segregation $H^R_{t-5}$ is positive, statistically significant, and substantively large, consistent with the theoretical prediction that more segregated cities translate rising income inequality into rising housing cost inequality more strongly, because in spatially sorted cities neighborhood-level income differences give developers stronger incentives to differentiate investment across neighborhoods. Both coefficients change only marginally when adding control variables. Model 5 adds the change in income segregation, which controls for an alternative mechanism: increases in income inequality may increase income segregation, allowing neighborhoods to be priced more unequally through sorting rather than investment. However, $\Delta H^R_{inc}$ is also an outcome of the spatial investment process, making it a bad control that absorbs part of the effect being estimated. The result is ambiguous: contrary to the expectation that inclusion reduces the interaction coefficient (by absorbing the alternative channel), it increases slightly — which could indicate that $\Delta H^R_{inc}$ acts more as a bad control than as a competing channel, or simply reflect estimation noise given the limited variation.
+
+The plot below illustrates the moderation: predicted $\Delta$Housing Cost Gini as a function of $\Delta$Income Gini at three levels of lagged income segregation (low = $-1$ SD, mean = 0, high = $+1$ SD). All other predictors are held at zero (a no-change baseline). Year FE are absorbed. The prediction is based on the total-effect specification in model 4. The steeper slope for high-segregation metros captures the predicted amplification effect and highlights the substantive size of the interaction.
+
+```{r housing_ineq_fd_pred, fig.height=4}
+h_sd     <- sd(metro_vars_fd$H_inc_lag_c, na.rm = TRUE)
+x_seq    <- seq(min(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                max(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                length.out = 100)
+h_mn_lag <- mean(metro_vars_fd$H_inc_lag, na.rm = TRUE)
+h_levels <- c(-h_sd, 0, h_sd)
+h_labels <- sprintf(c("Low ($-$1 SD, $%.3f$)",
+                       "Mean ($%.3f$)",
+                       "High ($+$1 SD, $%.3f$)"),
+                    h_levels + h_mn_lag)
+
+b <- coef(cm_fd4)
+V <- vcov(cm_fd4)[c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c"),
+                   c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c")]
+
+expand.grid(d_gini_inc = x_seq, H_inc_lag_c = h_levels) |>
+  mutate(
+    H_label = factor(H_inc_lag_c, levels = h_levels, labels = h_labels),
+    y_hat   = b["d_gini_inc"]             * d_gini_inc
+            + b["H_inc_lag_c"]            * H_inc_lag_c
+            + b["d_gini_inc:H_inc_lag_c"] * d_gini_inc * H_inc_lag_c,
+    se      = mapply(function(x, h) {
+                z <- c(x, h, x * h)
+                sqrt(as.numeric(z %*% V %*% z))
+              }, d_gini_inc, H_inc_lag_c),
+    ylo     = y_hat - 1.96 * se,
+    yhi     = y_hat + 1.96 * se
+  ) |>
+  ggplot(aes(x = d_gini_inc, colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  labs(
+    x = TeX("$\\Delta$ Income Gini"),
+    y = TeX("$\\Delta$ Housing Cost Gini")
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "H2_seg_ineqFD.pdf"), height = 12, width = 18, units = "cm")
+```
+
+
+
+## Limitations
+
+Two features of the FD design limit statistical power here. First, first-differencing removes the between-metro variance that constitutes the bulk of variation in both income inequality and segregation, leaving only the modest within-metro, period-to-period changes to identify the interaction (see above). Second, with only three difference periods per metro and one-way metro area clustering, degrees of freedom for the year dimension are exhausted, making the standard errors conservative. The positive direction of the interaction is nonetheless consistent and statistically significant across the models — even after adding several control variables. Identifying a sizeable and significant effect with such limited variation provides strong evidence for the hypothesis.
+
+
+# Robustness Checks
+
+## Cap Rates and Region Fixed Effects
+
+The metro-specific $\hat{r}_{mt}$ could confound the Gini if the rent-to-price ratio itself co-varies with income inequality or segregation, creating a spurious correlation between housing cost inequality and the regressors rather than reflecting genuine variation in housing cost inequality. As the price-to-rent ratio is affected by general economic conditions such as interest rates, it is plausible that cap rate changes are correlated with changes in income inequality. Two alternative cap rate assumptions are therefore carried as robustness checks:
+
+| Variant | Cap rate | What it isolates |
+|---|---|---|
+| `gini_housing_metro` | Metro×year from PUMS medians | Main specification |
+| `gini_housing_metro_5pct` | Fixed 5 % p.a. | Removes all cap rate variation |
+| `gini_housing_metro_natl` | Year-specific national rate | Removes cross-metro variation in cap rates |
+
+The two checks address distinct threats to validity. The **fixed 5 % rate** eliminates all variation in the cap rate — both cross-sectional and temporal — so any result that survives cannot be an artefact of cap rate differences between metros or waves. The value of 5 % approximates the pre-boom historical average for the U.S. owner-occupied stock (Davis, Lehnert, and Martin 2008; Loewenstein and Willen 2023). The **national cap rate** retains year-to-year temporal variation but removes cross-metro differences in rent-to-price ratios; if estimates are stable when switching from a metro to a national cap rate, cross-metro structural differences in cap rates are not driving the results.
+
+The plots below show that the distribution in levels and changes in housing cost inequality are very similar across all cap rate definitions. They all correlate with each other by more than 0.95.
+
+
+```{r caprate_dens_levels}
+metro_vars |>
+  select(metro_area, year, gini_housing_metro, gini_housing_metro_5pct, gini_housing_metro_natl) |>
+  pivot_longer(starts_with("gini_housing"),
+               names_to  = "variant",
+               values_to = "gini") |>
+  mutate(
+    variant = case_when(
+      variant == "gini_housing_metro"      ~ "Metro cap rate",
+      variant == "gini_housing_metro_5pct" ~ "Fixed 5%",
+      variant == "gini_housing_metro_natl" ~ "National cap rate"
+    ),
+    year = factor(year)
+  ) |>
+  ggplot() +
+  aes(x = gini, fill = variant, colour = variant) +
+  geom_density(alpha = 0.3) +
+  facet_wrap(~year) +
+  labs(x = "Housing Cost Gini", y = "Density", fill = "Cap Rate", colour = "Cap Rate") +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+```{r caprate_dens_fd}
+metro_vars_fd |>
+  select(metro_area, year, d_gini_housing, d_gini_housing_5pct, d_gini_housing_natl) |>
+  pivot_longer(starts_with("d_gini_housing"),
+               names_to  = "variant",
+               values_to = "delta") |>
+  mutate(
+    variant = case_when(
+      variant == "d_gini_housing"      ~ "Metro cap rate",
+      variant == "d_gini_housing_5pct" ~ "Fixed 5%",
+      variant == "d_gini_housing_natl" ~ "National cap rate"
+    ),
+    year = factor(year)
+  ) |>
+  ggplot() +
+  aes(x = delta, fill = variant, colour = variant) +
+  geom_density(alpha = 0.3) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~year) +
+  labs(x = "\u0394 Housing Cost Gini", y = "Density", fill = "Cap Rate", colour = "Cap Rate") +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+I also add a model with census division fixed effects. In the differenced equation, these become census division × period dummies that allow each region to have a different average change in housing cost inequality per wave. This absorbs region-specific housing market cycles that year fixed effects alone do not capture. Because the most segregated metros cluster in the Northeast and Midwest, such regional cycles could otherwise create a spurious correlation between lagged segregation and housing cost changes.
+
+I re-estimate model FD 4 with the original dependent variable for comparison, then substitute the two alternative cap rate variants using the same specification.
+
+```{r housing_ineq_fd_rob}
+dv_row_fd_rob <- data.frame(rbind(c(
+  "Dependent Variable",
+  "\u0394Gini Housing (metro)", "\u0394Gini Housing (metro)",
+  "\u0394Gini Housing (5%)",    "\u0394Gini Housing (5%)",
+  "\u0394Gini Housing (US)",    "\u0394Gini Housing (US)"
+)))
+attr(dv_row_fd_rob, "position") <- 1
+
+models_fd_rob <- list(
+  "(1)" = cm_fd4,
+  "(2)" = feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year + census_division,
+                data = metro_vars_fd, cluster = ~metro_area),
+  "(3)" = feols(d_gini_housing_5pct ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area),
+  "(4)" = feols(d_gini_housing_5pct ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year + census_division,
+                data = metro_vars_fd, cluster = ~metro_area),
+  "(5)" = feols(d_gini_housing_natl ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area),
+  "(6)" = feols(d_gini_housing_natl ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year + census_division,
+                data = metro_vars_fd, cluster = ~metro_area)
+)
+
+ms_args_fd_rob <- list(
+  add_rows    = dv_row_fd_rob,
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  notes       = list("Standard errors clustered by metro area in parentheses.", "+ p < 0.1, * p < 0.05, ** p < 0.01, *** p < 0.001.")
+)
+
+do.call(modelsummary, c(list(models_fd_rob, output = "html"),                               ms_args_fd_rob))
+do.call(modelsummary, c(list(models_fd_rob, output = paste0(results_dir, "H2_seg_ineqFD_rob.tex")), ms_args_fd_rob))
+```
+
+The coefficient on $\Delta$Income Gini changes only marginally and remains highly significant across all models. The interaction coefficient decreases slightly when using the alternative cap rate operationalizations and is only significant at the 10 percent level when using the fixed 5 percent cap rate, but the sign remains in the expected direction and the estimates nonetheless remain substantively large. The addition of census division fixed effects does not change the results, confirming that regional trends did not confound the relationship. Taken together, the results for the interaction effect hold across different cap rates and regional controls.
+
+
+## Decomposition by Tenure
+
+The pooled Gini combines within-tenure inequality with the renter/owner cost gap. To understand which component drives the moderation result, I re-estimate the FD model separately using Ginis for contract rent and estimated home value as dependent variables. Because these measures are computed from directly observed values without any cap rate conversion, this also bypasses the imputed rent assumption.
+
+Recall that the moderation hypothesis concerns how strongly a rise in income inequality translates into housing cost inequality given the level of segregation. I expect the moderation to be stronger for home values than for rents. When income inequality increases (especially at the top), in more segregated metros the gains of top earners flow into a narrow set of premium neighborhoods where high-income households are concentrated, bidding up values there. At the same time, Glaeser and Gyourko's (2005) supply asymmetry implies that low-income areas do not depreciate symmetrically: the durable housing stock decays slowly. Additionally, the recent increase in income inequality is primarily driven by an increase in top incomes and stagnating low incomes (Piketty, Saez and Zucman 2018) and high-income households in the US tend to own their homes. Together, concentrated appreciation at the top and sticky values at the bottom amplify how income inequality growth translates into value dispersion, more so in metros where income groups are spatially separated. The rental market absorbs the same income inequality increase more diffusely: renters are more mobile across neighbourhoods, lease contracts slow price adjustment, and the income–rent gradient is less steep to begin with.
+
+Note that null results here do not necessarily contradict the main finding: if the moderation operates primarily through the between-group channel — segregation widening the cost gap between renters and owners as groups — it would not appear in either tenure-specific Gini.
+
+```{r housing_ineq_fd_decomp}
+dv_row_decomp <- data.frame(rbind(c(
+  "Dependent Variable",
+  "\u0394Rent Gini", "\u0394Rent Gini",
+  "\u0394Value Gini", "\u0394Value Gini"
+)))
+attr(dv_row_decomp, "position") <- 1
+
+models_fd_decomp <- list(
+  "(1)" = feols(d_gini_rent ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area),
+  "(2)" = feols(d_gini_rent ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year + census_division,
+                data = metro_vars_fd, cluster = ~metro_area),
+  "(3)" = feols(d_gini_val  ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area),
+  "(4)" = feols(d_gini_val  ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year + census_division,
+                data = metro_vars_fd, cluster = ~metro_area)
+)
+
+ms_args_fd_decomp <- list(
+  add_rows    = dv_row_decomp,
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  notes       = list("Standard errors clustered by metro area in parentheses.", "+ p < 0.1, * p < 0.05, ** p < 0.01, *** p < 0.001.")
+)
+
+do.call(modelsummary, c(list(models_fd_decomp, output = "html"),                                    ms_args_fd_decomp))
+do.call(modelsummary, c(list(models_fd_decomp, output = paste0(results_dir, "H2_seg_ineqFD_decomp.tex")), ms_args_fd_decomp))
+```
+
+```{r housing_ineq_fd_decomp_pred, fig.height=4}
+decomp_rent <- feols(d_gini_rent ~ d_gini_inc * H_inc_lag_c +
+                       pop_growth_metro + d_unemp + d_pct_hispanic +
+                       d_H_race_multi | year,
+                     data = metro_vars_fd, cluster = ~metro_area)
+
+decomp_val  <- feols(d_gini_val  ~ d_gini_inc * H_inc_lag_c +
+                       pop_growth_metro + d_unemp + d_pct_hispanic +
+                       d_H_race_multi | year,
+                     data = metro_vars_fd, cluster = ~metro_area)
+
+pred_decomp_df <- function(mod, panel_label) {
+  b <- coef(mod)
+  V <- vcov(mod)[c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c"),
+                  c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c")]
+  expand.grid(d_gini_inc = x_seq, H_inc_lag_c = h_levels) |>
+    mutate(
+      panel   = panel_label,
+      H_label = factor(H_inc_lag_c, levels = h_levels, labels = h_labels),
+      y_hat   = b["d_gini_inc"]             * d_gini_inc
+              + b["H_inc_lag_c"]            * H_inc_lag_c
+              + b["d_gini_inc:H_inc_lag_c"] * d_gini_inc * H_inc_lag_c,
+      se      = mapply(function(x, h) {
+                  z <- c(x, h, x * h)
+                  sqrt(as.numeric(z %*% V %*% z))
+                }, d_gini_inc, H_inc_lag_c),
+      ylo     = y_hat - 1.96 * se,
+      yhi     = y_hat + 1.96 * se
+    )
+}
+
+bind_rows(
+  pred_decomp_df(decomp_rent, "\u0394 Rent Gini"),
+  pred_decomp_df(decomp_val,  "\u0394 Value Gini")
+) |>
+  mutate(panel = factor(panel, levels = c("\u0394 Rent Gini", "\u0394 Value Gini"))) |>
+  ggplot(aes(x = d_gini_inc, colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  facet_wrap(~panel) +
+  labs(x = TeX("$\\Delta$ Income Gini"), y = TeX("$\\Delta$ Gini")) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "H_2seg_ineqFD_decomp.pdf"), height = 12, width = 18, units = "cm")
+```
+
+The FD results confirm the suspected asymmetry. The effect of a change in income inequality on housing cost inequality is positive and significant for both renters and owners. However, the effect is more than three times larger for owners than for renters. The interaction effect for home values is large and significant at the one percent level, while the rent interaction is small and insignificant. Even the standard demand-side controls (population growth and the change in the unemployment rate) are not significant in the model for changes in the rent Gini. The home value result implies that in metros where income segregation was higher at the start of a period, a given increase in income inequality over that period translated into a larger widening of home value dispersion. 
+
+
+## Value and Rent Segregation as Alternative Moderators
+
+Income segregation ($H^R_\text{inc}$) is the theoretically motivated moderator, but its low absolute level and limited within-metro variation may reduce statistical power. I therefore replace the lagged income segregation moderator with lagged home-value segregation ($H^R_\text{val}$, $r =$ `r round(cor(metro_vars$H_inc, metro_vars$H_val, use = "complete.obs"), 2)` with $H^R_\text{inc}$) and lagged gross-rent segregation ($H^R_\text{rent}$, $r =$ `r round(cor(metro_vars$H_inc, metro_vars$H_rent, use = "complete.obs"), 2)`) in otherwise identical FD 4 specifications.
+
+Three caveats apply. *Endogeneity:* value and rent segregation are conceptually closer to the outcome, so the moderator risks being partially constitutive of the outcome rather than an independent structural condition. *Proxy validity:* at $r =$ `r round(cor(metro_vars$H_inc, metro_vars$H_val, use = "complete.obs"), 2)`, $H^R_\text{val}$ largely substitutes for $H^R_\text{inc}$; a consistent result confirms that the two measures are interchangeable operationalisations but does not provide independent validation of the theoretical mechanism. *Conceptual distance:* at $r =$ `r round(cor(metro_vars$H_inc, metro_vars$H_rent, use = "complete.obs"), 2)`, $H^R_\text{rent}$ captures substantial variance orthogonal to income segregation, making it a less defensible proxy for the theoretical construct. The checks are therefore best understood as alternative operationalisations rather than strict robustness tests.
+
+```{r housing_ineq_fd_robseg}
+rob_fd_coef_names <- c(
+  fd_coef_names,
+  "H_val_lag_c"              = "Home-Value Seg. H\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_val_lag_c"   = "\u0394Income Gini \u00d7 H\u1d3f\u1d65\u2090\u2097 (t\u22125)",
+  "H_rent_lag_c"             = "Contract-Rent Seg. H\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_rent_lag_c"  = "\u0394Income Gini \u00d7 H\u1d3f\u1d63\u2091\u2099\u209c (t\u22125)"
+)
+
+modelsummary(
+  list(
+    "(1)" = cm_fd4,
+    "(2)" = feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(3)" = feols(d_gini_housing ~ d_gini_inc * H_val_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(4)" = feols(d_gini_housing ~ d_gini_inc * H_val_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(5)" = feols(d_gini_housing ~ d_gini_inc * H_rent_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(6)" = feols(d_gini_housing ~ d_gini_inc * H_rent_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = rob_fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  notes       = list("Standard errors clustered by metro area in parentheses.", "+ p < 0.1, * p < 0.05, ** p < 0.01, *** p < 0.001."),
+  output      = "html"
+)
+```
+
+The interaction effects using value and rent segregation as moderators are positive and statistically significant, although they are much smaller. The alternative operationalization of segregation therefore provides further support for the hypothesis.

@@ -25,9 +25,11 @@
 #   B25003B Tenure × NH-Black householder → racial homeownership rates/gaps  [ACS5a]
 #   B25003H Tenure × NH-White householder → racial homeownership rates/gaps  [ACS5a]
 #   B25003I Tenure × Hispanic householder → racial homeownership rates/gaps  [ACS5a]
-#   B25063  Gross rent (dollar brackets) → H^R rent segregation
-#   B25064  Median gross rent
-#   B25070  Gross rent as % of income    → rent burden
+#   B25056  Contract rent (dollar brackets) → H^R rent segregation
+#           Contract rent excludes utilities; consistent with PUMS quality proxy
+#           (RENT / rent_real). B25063 (gross rent brackets) excluded for this reason.
+#   B25058  Median contract rent
+#   B25070  Gross rent as % of income    → rent burden (gross rent is correct here)
 #   B25075  Home value (dollar brackets) → H^R home-value segregation
 #   B25077  Median home value
 #
@@ -35,6 +37,8 @@
 ## ── SETUP ────────────────────────────────────────────────────────────────────
 
 library(ipumsr)
+library(tigris)
+library(sf)
 
 # Download with ipumsr requires an IPUMS API key: https://account.ipums.org/api_keys
 # TODO set up API key and save the key to .Renviron.
@@ -42,7 +46,7 @@ library(ipumsr)
 
 # set_ipums_api_key("your-key", save = TRUE)
 
-data_dir <- "./data/ACS/"
+data_dir <- "./data/ACS/" # TODO for replication: change path
 
 
 ## ── DOWNLOAD: TABULAR DATA ───────────────────────────────────────────────────
@@ -59,9 +63,9 @@ acs_tables <- c(
   "B25003B",  # tenure × NH-Black householder → racial homeownership rates/gaps
   "B25003H",  # tenure × NH-White householder → racial homeownership rates/gaps
   "B25003I",  # tenure × Hispanic householder → racial homeownership rates/gaps
-  "B25063",   # gross rent dollar brackets (cash rent only) → H^R rent segregation
-  "B25064",   # median gross rent
-  "B25070",   # gross rent as % of income
+  "B25056",   # contract rent dollar brackets (excl. utilities) → H^R rent segregation
+  "B25058",   # median contract rent
+  "B25070",   # gross rent as % of income (correct for rent burden)
   "B25075",   # home value dollar brackets → H^R home-value segregation
   "B25077"    # median home value
 )
@@ -112,3 +116,11 @@ completed <- wait_for_extract(submitted, verbose = TRUE)
 download_extract(completed, download_dir = data_dir, progress = TRUE, overwrite = TRUE)
 
 remove(completed, submitted, extract_tabular, extract_shp)
+
+
+## ── DOWNLOAD: CBSA BOUNDARIES ────────────────────────────────────────────────
+# Pre-dissolved cartographic CBSA boundaries (cb = TRUE, year 2020).
+
+core_based_statistical_areas(year = 2020, cb = TRUE) |>
+  st_transform(4326) |>
+  write_sf(file.path(data_dir, "cbsa_2020.gpkg"), delete_dsn = TRUE)

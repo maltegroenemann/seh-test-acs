@@ -1,0 +1,538 @@
+---
+title: "Testing the ABM using the ACS"
+subtitle: "H1: Housing Segregation > Income Segregation"
+author: "Malte Grönemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error   = FALSE,
+                      out.width = "100%")
+
+# Packages
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(fixest)
+library(modelsummary)
+library(latex2exp)
+library(kableExtra)
+library(sf)
+library(geoarrow)
+library(tigris)
+options(tigris_use_cache = TRUE)
+
+# Plotting
+cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
+shapes <- c(0, 1, 2, 5, 6)
+
+# File Paths
+# TODO for replication: change paths
+# local paths for development
+#data_dir <- "~/Projects/SEHTestACS/data/"
+#results_dir <- "../results/"
+# paths at HELIX HPC
+data_dir <- "./data/"
+results_dir <- "./results/"
+
+# Data
+metro_vars <- read_parquet(paste0(data_dir, "metro_vars.parquet"))
+acs <- read_parquet(paste0(data_dir, "acs_metro.parquet"))
+metro_vars_geo <- read_parquet(paste0(data_dir, "metro_vars_geo.parquet"), as_data_frame = FALSE) |>
+  st_as_sf()
+
+top50_2024 <- metro_vars |>
+  filter(year == 2024) |>
+  slice_max(pop_metro, n = 50) |>
+  pull(metro_area)
+```
+
+The formal model invariably produces more unevenly distributed features of houses in space than of the population. Because investments into housing quality are based on neighborhood averages, the spatial distribution of housing quality is very smooth and quality is very similar within each neighborhood. Characteristics of the population of a neighborhood are less homogeneous within neighborhoods because moves are noisier: a household might be able to afford a higher-utility unit in a different neighborhood, but that unit is already occupied by another household, so the household stays at the currently best available option rather than moving to the unit that would maximise its utility and produce perfect segregation. As rent and home value are monetary expressions of the desirability of a housing unit and therefore depend on the neighborhood, they show high spatial unevenness as well. The first hypothesis therefore states:
+
+> Rent and housing quality are more unequally distributed in space within cities than household income.
+
+I operationalize spatial unevenness in housing characteristics with the unevenness in home values, contract rent, and tenure type (renting vs. owning). Higher home values and rents are indicative of a higher housing quality as these housing units are likely larger, of better quality and located in better neighborhoods. To make the comparison sound, I use contract rent and therefore exclude utility costs such as water and energy as these monthly costs are also not part of the estimated home value. Higher utility costs can also be a consequence of low quality such as poor insulation or leaky pipes. As such quality issues are priced into contract rent to compensate for higher utility costs, contract rent is the cleaner choice.
+
+In the US, the housing market is not only characterized by income segregation but also racial segregation. The former (in combination with group differences in income) seems to be less a cause of the latter than is often assumed. Instead, historical patterns of racially segregated neighborhoods reproduce themselves (Krysan and Crowder 2017), effectively creating a segmented housing market. To see whether these relationships hold within race groups, I compare income and tenure segregation by three race groups: non-hispanic White, non-hispanic Black, and Hispanic/Latino. Home values and rents are not available as brackets separated by race (at least not in the publicly accessible ACS data) so that I cannot compare income segregation to rent/value segregation within race groups.
+
+
+# Operationalization
+
+Spatial unevenness is measured by the rank-order information theory index $H^R$ (Reardon & Bischoff 2011) for the continuous variables income, contract rent, and home value, and by the binary Theil $H$ for the categorical variable tenure. Both indices are bounded $[0,1]$ and scale-independent: $H^R$ is robust to bracket boundary shifts and the absolute level of the variable, so cross-city and over-time comparisons are valid without deflating to constant dollars. The two indices are conceptually consistent — $H^R$ for a binary variable reduces exactly to binary $H$ — but not identical: $H^R$ summarises segregation across the full distributional gradient by integrating binary $H$ values across all possible cutpoints, whereas $H$ for tenure captures a single renter/owner split. Comparisons between $H^R$ and $H$ are therefore meaningful as measures of overall spatial unevenness but should not be interpreted as the same underlying quantity. 
+
+A further difference in universe should be noted: $H_{inc}$ is computed over all households, whereas $H_{rent}$ covers only cash-rent-paying renters and $H_{val}$ only owner-occupiers. In principle this could inflate the housing indices if renters or owners are already more spatially concentrated as subpopulations. In practice, however, $H^R$ is distribution-invariant: it captures how unevenly the *within-universe* distribution of rents or values is spread across tracts. Therefore, the comparison remains meaningful as a test of whether each housing dimension is more spatially unequal than income within its respective population.
+
+I use segregation measures based on tract-level counts in the ACS. Census tracts are designed by the Census Bureau to have a population of about 4000 but they can vary. In my sample, the average tract has a population of `r mean(acs$pop)` but tract population varies between `r min(acs$pop)` and `r max(acs$pop)`. The number of tracts by metro area varies between `r min(metro_vars$n_tracts)` and `r max(metro_vars$n_tracts)` with a mean of `r round(mean(metro_vars$n_tracts), 3)`. I use uncorrected estimates even though there are known biases in segregation measures due to sampling error (among other sources) but they are less consequential in regression analyses. Home value segregation is based on homeowners' self-assessment which comes with a few methodological problems. For further discussion of the last two points, see the paper.
+
+
+# Description of Segregation
+
+## Income and Housing Segregation
+
+```{r hist}
+metro_vars |>
+  filter(year == 2024) |>
+  select(metro_area, year, H_inc, H_val, H_rent, H_tenure) |>
+  pivot_longer(starts_with("H_"),
+               names_to = "H_dimension",
+               values_to = "H_index") |>
+  mutate(H_dimension = case_when(H_dimension == "H_inc"     ~ "Household Income (H^R)",
+                                 H_dimension == "H_rent"    ~ "Contract Rent",
+                                 H_dimension == "H_val"     ~ "Home Value",
+                                 H_dimension == "H_tenure"  ~ "Tenure Type")) |>
+  ggplot() +
+  aes(H_index,
+      fill = H_dimension,
+      colour = H_dimension) +
+  geom_density(alpha = 0.4) +
+  labs(x = NULL, y = "Density", colour = NULL, fill = NULL) +
+  scale_fill_manual(values = cb_palette,
+                    labels = c("Household Income (H^R)"   = TeX("Household Income $H^R$"),
+                                "Contract Rent"               = TeX("Contract Rent $H^R$"),
+                                "Home Value"               = TeX("Home Value $H^R$"),
+                                "Tenure Type"              = TeX("Tenure Type $H$"))) +
+  scale_colour_manual(values = cb_palette,
+                    labels = c("Household Income (H^R)"   = TeX("Household Income $H^R$"),
+                                "Contract Rent"               = TeX("Contract Rent $H^R$"),
+                                "Home Value"               = TeX("Home Value $H^R$"),
+                                "Tenure Type"              = TeX("Tenure Type $H$"))) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "H1_segdensity.pdf"), height = 12, width = 18, units = "cm")
+```
+
+Looking at how features of the population and the housing stock are spatially distributed within cities, I find that income segregation tends to be much lower on average and varies less between cities than features of the housing stock. Contract rent, estimated home values and tenure type are more unequally distributed in space across cities and vary quite significantly between them. This already hints at the hypothesis that housing tends to be more unequally distributed in space than income.
+
+Over all metros and periods, home value is most unevenly distributed of the continuous variables ($H^R$ = `r round(mean(metro_vars$H_val, na.rm = T), 3)`), followed by rent ($H^R$ = `r round(mean(metro_vars$H_rent, na.rm = T), 3)`) and income ($H^R$ = `r round(mean(metro_vars$H_inc, na.rm = T), 3)`; $H(0.5)$ = `r round(mean(metro_vars$H_inc_p50, na.rm = T), 3)`). Home value and rents are substantially uneven among tracts. Tenure type is also substantially unequal between census tracts with $H$ = `r round(mean(metro_vars$H_tenure, na.rm = T), 3)`. Racial/ethnic segregation is very prevalent in the US and amounts to $H$ = `r round(mean(metro_vars$H_bw, na.rm = T), 3)` when measured between Whites and Blacks only and to $H$ = `r round(mean(metro_vars$H_race_multi, na.rm = T), 3)` for the multi-group Theil index on average. 
+
+
+```{r}
+metro_vars |>
+  select(H_inc, H_rent, H_val, H_tenure, H_bw, H_race_multi) |>
+  cor(use = "complete.obs") |>
+  ggcorrplot(type = "upper",
+             show.legend = F, lab = T) +
+  labs(title = "Correlation Matrix")
+```
+
+Cities with high income segregation tend to be segregated on the other dimensions as well, in line with the notion derived from the computational model that segregation emerges jointly in all dimensions. The association is strongest with home values (0.79). Where income sorts households across tracts, property values track that sorting closely; tenure segregation is also highly related to income segregation (0.73) although it is less strongly correlated with value segregation (0.49). Rent segregation is moderately correlated to income segregation (0.56), home value segregation (0.63), and tenure segregation (0.4), indicating that rents are generally more unevenly placed in space when incomes, tenure and home values are, but remain somewhat decoupled from them.
+
+The two racial measures correlate 0.83, which is partly definitional, since multigroup segregation contains the Black–White contrast as a component. More informative is that both relate almost identically to everything else. Extending the measure to Hispanics and other groups changes nothing about how racial segregation maps onto the housing dimensions. Racial segregation is moderately associated with income and value segregation and a bit less with rent and tenure segregation.
+
+
+```{r}
+metro_vars |>
+  filter(metro_area %in% top50_2024) |>
+  select(metro_area, metro_name_short, year, H_inc, H_rent, H_val, H_tenure) |>
+  mutate(metro_name_short = forcats::fct_reorder(metro_name_short, H_inc, .fun = mean, na.rm = TRUE)) |>
+  pivot_longer(starts_with("H_"),
+               names_to = "H_dimension",
+               values_to = "H_index") |>
+  mutate(H_dimension = case_when(H_dimension == "H_inc"     ~ "Household Income (H^R)",
+                                 H_dimension == "H_rent"    ~ "Contract Rent",
+                                 H_dimension == "H_val"     ~ "Home Value",
+                                 H_dimension == "H_tenure"  ~ "Tenure Type")) |>
+  ggplot() +
+  aes(y = H_index,
+      x = metro_name_short,
+      colour = H_dimension,
+      shape = H_dimension,
+      group = H_dimension) +
+  geom_point() +
+  geom_line() +
+  facet_grid(rows = vars(year)) +
+  labs(x = NULL, y = NULL, colour = NULL, shape = NULL) +
+  scale_color_manual(values = cb_palette,
+                     labels = c("Household Income (H^R)" = TeX("Household Income $H^R$"),
+                                "Contract Rent"          = TeX("Contract Rent $H^R$"),
+                                "Home Value"             = TeX("Home Value $H^R$"),
+                                "Tenure Type"            = TeX("Tenure Type $H$"))) +
+  scale_fill_manual(values = cb_palette) +
+  scale_shape_manual(values = shapes,
+                     labels = c("Household Income (H^R)" = TeX("Household Income $H^R$"),
+                                "Contract Rent"          = TeX("Contract Rent $H^R$"),
+                                "Home Value"             = TeX("Home Value $H^R$"),
+                                "Tenure Type"            = TeX("Tenure Type $H$"))) +
+  scale_linetype_manual(values = lines) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+This plot shows the segregation indices of the 50 most populous metro areas across all four ACS windows. It shows more clearly that not only is housing more unequally distributed in space than income on average, but the ordering of which feature has higher average indices is also reproduced in almost every city: home values are most segregated, followed by tenure and rents, and then income with quite some distance.
+
+
+## Regional Differences in Segregation
+
+```{r inc_seg_map}
+us_states <- states(cb = TRUE, year = 2020) |>
+  filter(!STUSPS %in% c("AK", "HI", "PR", "VI", "GU", "AS", "MP")) |>
+  st_transform(4326)
+
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = H_inc), colour = NA) +
+  scale_fill_viridis_b(name = expression(H^R), option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Income Segregation by Metro Area (2024)") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+There does not appear to be a strong regional difference in income segregation.
+
+```{r val_seg_map}
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = H_val), colour = NA) +
+  scale_fill_viridis_b(name = expression(H^R), option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Home Value Segregation by Metro Area (2024)") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+Value segregation tends to be low in the Pacific North-West, New England, parts of the Midwest and the South-East. Value segregation is highest in California, Texas and some cities on the East Coast.
+
+```{r rent_seg_map}
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = H_rent), colour = NA) +
+  scale_fill_viridis_b(name = expression(H^R), option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Contract Rent Segregation by Metro Area (2024)") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+Rent segregation largely follows the geographic pattern of value segregation, although Florida and some Southern states appear to be more spatially unequal in rent relative to home values.
+
+
+```{r}
+metro_vars |>
+  filter(year == 2024) |>
+  select(metro_area, metro_name_short, census_region, pop_metro, H_inc, H_val, H_rent, H_tenure) |>
+  pivot_longer(starts_with("H_"),
+               names_to = "H_dimension",
+               values_to = "H_index") |>
+  mutate(H_dimension = case_when(H_dimension == "H_inc"     ~ "Household Income H\u1d3f",
+                                 H_dimension == "H_rent"    ~ "Contract Rent H\u1d3f",
+                                 H_dimension == "H_val"     ~ "Home Value H\u1d3f",
+                                 H_dimension == "H_tenure"  ~ "Tenure Type H")) |>
+  ggplot() +
+  aes(x = log(pop_metro),
+      y = H_index,
+      colour = H_dimension) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm") +
+  facet_wrap(~H_dimension) +
+  labs(x = "Log(Population)", y = NULL, colour = NULL) +
+  scale_color_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+The maps and the plot showing the largest fifty metropolitan areas already hint at a possible relationship of segregation with population size. More populous metros tend to be more segregated in all dimensions. As there are many more smaller metros, the variation in segregation is large. Variation in segregation also declines with population size.
+
+
+## Changes in Residential Segregation
+
+```{r seg_fd_data, include=FALSE}
+metro_vars_seg_fd <- metro_vars |>
+  arrange(metro_area, year) |>
+  group_by(metro_area) |>
+  mutate(
+    d_H_inc    = H_inc    - lag(H_inc),
+    d_H_rent   = H_rent   - lag(H_rent),
+    d_H_val    = H_val    - lag(H_val),
+    d_H_tenure = H_tenure - lag(H_tenure)
+  ) |>
+  ungroup() |>
+  filter(!is.na(d_H_inc))
+```
+
+```{r seg_fd_dens}
+metro_vars_seg_fd |>
+  select(metro_area, year, d_H_inc, d_H_rent, d_H_val, d_H_tenure) |>
+  pivot_longer(starts_with("d_H_"),
+               names_to  = "dimension",
+               values_to = "delta") |>
+  mutate(
+    dimension = case_when(
+      dimension == "d_H_inc"    ~ "\u0394 Income H\u1d3f",
+      dimension == "d_H_rent"   ~ "\u0394 Contract Rent H\u1d3f",
+      dimension == "d_H_val"    ~ "\u0394 Home Value H\u1d3f",
+      dimension == "d_H_tenure" ~ "\u0394 Tenure H"
+    ),
+    year = factor(year)
+  ) |>
+  ggplot() +
+  aes(x = delta, fill = year, colour = year) +
+  geom_density(alpha = 0.3) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~dimension) +
+  labs(x = NULL, y = "Density", fill = "Period end", colour = "Period end") +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Residential segregation is very stable over time and it usually takes decades for substantial changes in levels of segregation within a metro area. The plot above shows indeed that segregation levels only change slightly between the 5-year ACS windows. Part of it may be noise from sampling. Interestingly, changes in income segregation have been smallest while changes in spatial unevenness of contract rent are highest. Unevenness in contract rent also appears to have increased from 2019 to 2024. Home value and tenure have changed more than income segregation but less than rent. Home value segregation increased overall from 2014 to 2019. Somewhat surprisingly, given that the physical housing stock changes only slowly, tenure segregation increased the most, especially from 2019 to 2024.
+
+```{r seg_fd_maps, out.width="50%"}
+seg_fd_geo_2024 <- metro_vars_geo |>
+  filter(year == 2024) |>
+  left_join(
+    metro_vars_seg_fd |>
+      filter(year == 2024) |>
+      select(metro_area, d_H_inc, d_H_val, d_H_rent, d_H_tenure),
+    by = "metro_area"
+  )
+
+map_seg_fd <- function(var, title) {
+  ggplot(seg_fd_geo_2024) +
+    geom_sf(data = us_states, fill = "grey75", colour = "grey50", linewidth = 0.2) +
+    geom_sf(aes(fill = .data[[var]]), colour = NA) +
+    scale_fill_gradient2(name = expression(Delta * H^R),
+                         low = "#2166AC", mid = "white", high = "#B2182B",
+                         midpoint = 0, na.value = "grey60") +
+    coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+    labs(title = title) +
+    theme_void() +
+    theme(legend.position = "right")
+}
+
+map_seg_fd("d_H_inc",    "Change in Income Segregation by Metro Area (2019\u20132024)")
+map_seg_fd("d_H_val",    "Change in Home Value Segregation by Metro Area (2019\u20132024)")
+map_seg_fd("d_H_rent",   "Change in Contract Rent Segregation by Metro Area (2019\u20132024)")
+map_seg_fd("d_H_tenure", "Change in Tenure Segregation by Metro Area (2019\u20132024)")
+```
+
+Changes in income segregation are small and appear to be distributed relatively evenly across the US — a pattern consistent with the idea that most changes stem from sampling error. There does, however, seem to be some increase in income segregation in the South-East. Home value segregation changed more substantially and increased in the Pacific North-West and Northern California, Nevada, and parts of the South-East. It decreased around Southern California, the North-West, parts of Texas and Florida, as well as the Midwest. Contract rent segregation increased almost everywhere, with a notable increase along the Gulf coast. Tenure segregation also increased across the US between 2019 and 2024.
+
+
+## Within-Race Income and Tenure Segregation
+
+```{r inc_seg_by_race_dens}
+metro_vars |>
+  filter(year == 2024) |>
+  select(metro_area, H_inc, H_inc_nhw, H_inc_nhb, H_inc_his) |>
+  pivot_longer(-metro_area,
+               names_to  = "group",
+               values_to = "H") |>
+  mutate(
+    group = case_when(
+      group == "H_inc"     ~ "Overall",
+      group == "H_inc_nhw" ~ "NH White",
+      group == "H_inc_nhb" ~ "NH Black",
+      group == "H_inc_his" ~ "Hispanic"
+    )
+  ) |>
+  ggplot() +
+  aes(x = H, fill = group, colour = group) +
+  geom_density(alpha = 0.3) +
+  labs(x = expression(H^R), y = "Density", fill = NULL, colour = NULL) +
+  scale_fill_manual(values   = cb_palette) +
+  scale_colour_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Comparing the distribution of within-race income segregation across cities in the contiguous US, I find a stark contrast between Whites and the other racial groups. Income segregation for Whites almost perfectly mirrors overall levels of income segregation, with similarly low levels and low variation between cities. In contrast, Blacks and Hispanics generally experience much higher levels of within-race income segregation, and cities differ considerably in how much within-race income segregation these groups face.
+
+```{r within_race_inc_seg_map}
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = H_inc_nhw), colour = NA) +
+  scale_fill_viridis_b(name = expression(H^R), option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Income Segregation within Race by Metro Area (2024) - Non-Hispanic White") +
+  theme_void() +
+  theme(legend.position = "right")
+
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = H_inc_nhb), colour = NA) +
+  scale_fill_viridis_b(name = expression(H^R), option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Income Segregation within Race Metro Area (2024) - Non-Hispanic Black") +
+  theme_void() +
+  theme(legend.position = "right")
+
+metro_vars_geo |>
+  filter(year == 2024) |>
+  ggplot() +
+  geom_sf(data = us_states, fill = "grey95", colour = "grey50", linewidth = 0.2) +
+  geom_sf(aes(fill = H_inc_his), colour = NA) +
+  scale_fill_viridis_b(name = expression(H^R), option = "viridis", na.value = "grey80") +
+  coord_sf(xlim = c(-125, -66), ylim = c(24, 50), expand = FALSE) +
+  labs(title = "Income Segregation within Race by Metro Area (2024) - Hispanic") +
+  theme_void() +
+  theme(legend.position = "right")
+```
+
+The low levels of White income segregation become apparent in the map and are evident across all regions of the contiguous US, with only a few higher values clustered in Southern California and Texas. Black income segregation tends to be low in the East and Midwest (with exceptions) and high on the West coast, specifically in the Pacific North-West. Hispanic income segregation tends to be low at the coasts and higher in the Midwest and the South-East.
+
+```{r}
+metro_vars |>
+  select(H_inc, H_tenure, H_bw, H_race_multi, H_inc_nhw, H_tenure_nhw, H_inc_nhb, H_tenure_nhb, H_inc_his, H_tenure_his) |>
+  cor(use = "complete.obs") |>
+  ggcorrplot(type = "upper",
+             show.legend = F, lab = T) +
+  labs(title = "Correlation Matrix")
+```
+
+Tenure and income segregation move together far more tightly within racial groups than in the population as a whole: 0.53 overall, but 0.60 among Whites and 0.94–0.95 among Hispanics and Blacks. Within groups, sorting by tenure and sorting by income describe nearly the same partition.
+
+Cities with high racial segregation are also cities in which the White population is internally stratified. Within-White tenure segregation correlates 0.80 with Black–White segregation and 0.41 with total tenure segregation, and within-White income segregation correlates 0.65 with total income segregation. For Blacks the associations run the other way. Within-Black income segregation correlates −0.29 with total income segregation and −0.52 with multigroup racial segregation; the tenure figures are −0.26 and −0.50. Cities that are highly segregated overall have comparatively economically mixed Black neighborhoods. These two patterns together are consistent with a White flight hypothesis: racial sorting and within-White tenure stratification were produced jointly as White households distributed across a suburban ring differentiated by tenure and income, while Black households remained constrained across the income distribution, leaving middle-class and poor Black households in the same tracts.
+
+Within-Hispanic segregation stands apart. Its two components correlate 0.94 with each other but only 0.07–0.31 with everything else, with signs that flip across the matrix — mildly positive with racial segregation, mildly negative with the within-White and within-Black measures. Cities that are segregated on the other dimensions are not systematically segregated within their Hispanic population.
+
+```{r hist_race_inc}
+metro_vars |>
+  filter(year == 2024) |>
+  select(metro_area, metro_name, year,
+         H_inc_nhw_p50, H_inc_nhb_p50, H_inc_his_p50,
+         H_tenure_nhw, H_tenure_nhb, H_tenure_his) |>
+  pivot_longer(starts_with("H_"),
+               names_to = "H_dimension",
+               values_to = "H_index") |>
+  mutate(
+    race_group = case_when(grepl("nhw", H_dimension) ~ "NH-White",
+                           grepl("nhb", H_dimension) ~ "NH-Black",
+                           grepl("his", H_dimension) ~ "Hispanic"),
+    H_type     = case_when(grepl("p50",    H_dimension) ~ "Income H(0.5)",
+                           grepl("tenure", H_dimension) ~ "Tenure H")) |>
+  ggplot() +
+  aes(H_index,
+      fill = H_type,
+      colour = H_type) +
+  geom_density(alpha = 0.4) +
+  facet_grid(rows = vars(race_group)) +
+  scale_color_manual(values = cb_palette) +
+  scale_fill_manual(values = cb_palette) +
+  labs(x = NULL, y = "Density", colour = NULL, fill = NULL) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+```{r seg_race_plot}
+metro_vars |>
+  filter(year == 2024 & metro_area %in% top50_2024) |>
+  select(metro_area, metro_name_short, year, H_inc,
+         H_inc_nhw_p50, H_inc_nhb_p50, H_inc_his_p50,
+         H_tenure_nhw, H_tenure_nhb, H_tenure_his) |>
+  mutate(metro_name_short = forcats::fct_reorder(metro_name_short, H_inc, .fun = mean, na.rm = TRUE)) |>
+  select(-H_inc) |>
+  pivot_longer(starts_with("H_"),
+               names_to = "H_dimension",
+               values_to = "H_index") |>
+  mutate(
+    race_group = case_when(grepl("nhw", H_dimension) ~ "NH-White",
+                           grepl("nhb", H_dimension) ~ "NH-Black",
+                           grepl("his", H_dimension) ~ "Hispanic"),
+    H_type     = case_when(grepl("inc",    H_dimension) ~ "Income H(0.5)",
+                           grepl("tenure", H_dimension) ~ "Tenure")
+  ) |>
+  ggplot() +
+  aes(y = H_index,
+      x = metro_name_short,
+      colour = H_type,
+      shape = H_type,
+      group = H_type) +
+  geom_point() +
+  geom_line() +
+  facet_grid(rows = vars(race_group)) +
+  labs(x = "Metro Area", y = NULL, colour = NULL, shape = NULL) +
+  scale_color_manual(values = cb_palette,
+                     labels = c("Income H(0.5)" = TeX("Income $H(0.5)$"),
+                                "Tenure"        = TeX("Tenure $H$"))) +
+  scale_fill_manual(values = cb_palette) +
+  scale_shape_manual(values = shapes,
+                     labels = c("Income H(0.5)" = TeX("Income $H(0.5)$"),
+                                "Tenure"        = TeX("Tenure $H$"))) +
+  scale_linetype_manual(values = lines) +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+
+Comparing the distributions of housing and income segregation within groups across metros, I find that tenure segregation has a similar shape to income segregation for all three racial groups but tends to be slightly higher. Tenure segregation is very spread out for Hispanics and Blacks and only slightly higher than income segregation, while for Whites the distance between income and tenure segregation is much more pronounced and variation is lower. The line plot for the largest 50 metros confirms that tenure segregation exceeds income segregation most of the time.
+
+
+# Test of the Hypothesis
+
+The following plot shows the proportion of metro–year observations where rent, value, or tenure segregation exceed segregation by household income, first in general (upper panel) and then separated by race (lower panel) to test the hypothesis.
+
+```{r housingseg_barplot}
+extract_prop_ci <- function(m) {
+  ci <- confint(m, level = 0.90)
+  data.frame(percent  = 1 + coef(m)[[1]],
+             ci_lower = 1 + ci[1, 1])
+}
+
+seg_prop_ci <- bind_rows(
+  rent_greater_inc       = extract_prop_ci(feols(I((H_rent       > H_inc)         - 1L) ~ 1, cluster = ~metro_area + year, data = metro_vars)),
+  value_greater_inc      = extract_prop_ci(feols(I((H_val        > H_inc)         - 1L) ~ 1, cluster = ~metro_area + year, data = metro_vars)),
+  tenure_greater_incp50  = extract_prop_ci(feols(I((H_tenure     > H_inc_p50)     - 1L) ~ 1, cluster = ~metro_area + year, data = metro_vars)),
+  tenure_greater_inc_nhw = extract_prop_ci(feols(I((H_tenure_nhw > H_inc_nhw_p50) - 1L) ~ 1, cluster = ~metro_area + year, data = metro_vars)),
+  tenure_greater_inc_nhb = extract_prop_ci(feols(I((H_tenure_nhb > H_inc_nhb_p50) - 1L) ~ 1, cluster = ~metro_area + year, data = metro_vars)),
+  tenure_greater_inc_his = extract_prop_ci(feols(I((H_tenure_his > H_inc_his_p50) - 1L) ~ 1, cluster = ~metro_area + year, data = metro_vars)),
+  .id = "comparison"
+) |>
+  mutate(comparison = forcats::fct_reorder(comparison, percent),
+         group      = if_else(comparison %in% c("tenure_greater_inc_nhw",
+                                                "tenure_greater_inc_nhb",
+                                                "tenure_greater_inc_his"),
+                              "Within-Race", "General"))
+
+ggplot(seg_prop_ci) +
+  aes(y = comparison, x = percent, fill = comparison) +
+  geom_col() +
+  geom_errorbarh(aes(xmin = ci_lower, xmax = 1),
+                 height = 0.4, colour = "grey20") +
+  facet_grid(rows = vars(group), scales = "free_y", space = "free_y") +
+  geom_text(aes(label = paste0(round(percent * 100, 1), "%"), x = 0.15)) +
+  labs(x = NULL, y = NULL) +
+  scale_y_discrete(labels = c(
+    "rent_greater_inc"       = TeX("Contract Rent $H^R$ > Household Income $H^R$"),
+    "value_greater_inc"      = TeX("Home Value $H^R$ > Household Income $H^R$"),
+    "tenure_greater_incp50"  = TeX("Tenure $H$ > Household Income $H(0.5)$"),
+    "tenure_greater_inc_nhw" = TeX("Tenure $H$ > Household Income $H(0.5)$: Non-Hispanic White"),
+    "tenure_greater_inc_nhb" = TeX("Tenure $H$ > Household Income $H(0.5)$: Non-Hispanic Black"),
+    "tenure_greater_inc_his" = TeX("Tenure $H$ > Household Income $H(0.5)$: Hispanic")
+  )) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_fill_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "none")
+ggsave(paste0(results_dir, "H1_comparison.pdf"), height = 12, width = 18, units = "cm")
+```
+
+The plot shows that in the vast majority of metro-years, the evenness measures are higher for home value, contract rent, and tenure than for household income. The error bars show the lower bound of the one-sided 95% confidence interval, computed from an intercept-only linear probability model with two-way clustering by metro area and year. For the overall assessment, the one-sided 95% CI places the true proportion above `r round(seg_prop_ci$ci_lower[seg_prop_ci$comparison == "tenure_greater_incp50"] * 100, 1)`% for tenure and even higher for rent and home value. For Non-Hispanic Whites the CI lower bound is `r round(seg_prop_ci$ci_lower[seg_prop_ci$comparison == "tenure_greater_inc_nhw"] * 100, 1)`%. For Non-Hispanic Blacks and Hispanics, however, the proportion falls to approximately 80% and the CI lower bounds are substantially below 1, indicating that the hypothesis does not hold as universally within these groups.
+
+I interpret these findings as tentative support for the model. In general, features of the housing stock appear to be more unevenly placed in space than characteristics of households. I do not consider this a particularly strong test, however, since there are several limitations, both from the workings of the simulation model and the available empirical data. First, the ABM simulates features of the housing unit with only one variable, housing quality, and all households differ only in income and status, not in size and composition. In reality, a large part of rent and value depends on the size of the housing unit, and the size and layout of the home needs to fit the household composition. A rich couple might occupy a very high-quality loft that costs the same as a decent single-family home. The home's price and the household's income can mean very different things to different households with different needs. There are no (spatial) data on price per square metre or equivalence-weighted income in the ACS tables, whose comparison might approximate the hypothesis better. However, unit size is endogenous to the developers' decision, and to be able to afford a home, total household income matters, not equivalence-weighted income. This comparison is therefore internally consistent and any alternative comparison would suffer from an endogeneity problem. Second, the ABM models segregation as a self-organizing process while in reality, building codes and zoning laws could enforce the spatial unevenness of tenure and prices. Since such laws may be a strategy of existing homeowners to secure their assets (Rothwell and Massey 2010), regulations might be passed or changed after an endogenous process of segregation, again creating an endogeneity/simultaneity problem. But the level of zoning regulations varies across metros and (at least in the overall assessment) housing segregation almost always exceeds income segregation.
+
+As a bottom line, the empirical observation is mostly in line with the empirical expectation derived from the model and does not outright reject it. The question of why this pattern differs for racial minorities remains an interesting avenue for further research.
+

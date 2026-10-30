@@ -27,7 +27,8 @@
 #
 # Derived variables (monetary values in 1999 USD via CPI99):
 #   hhincome_real   HHINCOME * CPI99
-#   rentgrs_real    RENTGRS  * CPI99   (monthly gross rent; NA for owners)
+#   rentgrs_real    RENTGRS  * CPI99   (monthly gross rent; NA for owners; used for burden measures)
+#   rent_real       RENT     * CPI99   (monthly contract rent; NA for owners; used as quality proxy)
 #   valueh_real     VALUEH   * CPI99   (property value;    NA for renters / topcoded)
 #   inctot_real     INCTOT   * CPI99
 #   rent_to_inc     (RENTGRS * 12) / HHINCOME  [renters, HHINCOME > 0 only]
@@ -44,13 +45,20 @@
 #   equiv_income    hhincome_real / sqrt(NUMPREC), bottom-coded at 1 (OECD sqrt scale)
 #   log_equiv_inc   log(equiv_income)
 #   college         1 if EDUC >= 10 (BA or higher, IPUMS harmonised coding)
-#   quality         z-score of rentgrs_real (renters) / valueh_real (owners)
-#                   standardised within YEAR × CBSA × tenure
 #   recent_mover    1 if renter and MOVEDIN >= YEAR - 2
-#   quality_rc      robustness version of quality: renters standardised using
-#                   recent movers only to mitigate rent control distortions
 #
-# Note on OCC2010 → ISEI: ISEI prestige scores require an OCC2010-to-ISCO
+# NOTE: quality and quality_rc are computed in SEHTestACS3_citylevel.R, not here.
+#   Owner quality requires the metro × year cap rate (12 × med_rent / med_val) to
+#   convert valueh_real to monthly scale before adding util_monthly_real, so both
+#   tenures can be standardised on a comparable monthly housing cost basis.
+#   util_monthly_real   monthly utility costs in 1999 USD (owners only).
+#                   RENTGRS (gross rent) already includes utilities for renters, so this
+#                   variable is needed to put owner housing costs on the same footing.
+#                   = (COSTELEC + COSTGAS + COSTWATR + COSTFUEL / 12) × CPI99.
+#                   IPUMS codes 0 (NIU) and 1 (no charge / included in condo fee) → 0;
+#                   COSTFUEL is reported as an annual amount by ACS respondents (÷ 12).
+#
+# TODO? create ISEI score: ISEI prestige scores require an OCC2010-to-ISCO
 #   crosswalk (see Ganzeboom 2010). That step is deferred to the analysis
 #   script; OCC2010 is retained here in its raw form.
 #
@@ -62,15 +70,17 @@
 
 library(ipumsr)
 library(tigris)
-library(nanoparquet)
+library(arrow)
 library(dplyr)
 
 options(tigris_use_cache = TRUE)
 
+
+# TODO for replication: change paths
 data_dir <- "./data/PUMS/"
 ddi_file <- list.files(data_dir, pattern = "usa_.*\\.xml$", full.names = TRUE)
 
-acs <- read_parquet("./data/acs_top100.parquet")
+acs <- read_parquet("./data/acs_metro.parquet")
 
 output_dir <- "./data/"
 
@@ -111,16 +121,16 @@ gc()
 # to the county-to-2020-CBSA table from tigris.
 
 # County → 2020 CBSA
-county_cbsa <- counties(year = 2020) |>
+county_cbsa <- counties(year = 2020, cb = FALSE) |>
   as_tibble() |>
-  select(county_fips = GEOID, CBSAFP)
+  select(county_fips = GEOID, metro_area = CBSAFP)
 
 # 2020 CBSA names
 cbsa_names <- core_based_statistical_areas(year = 2020, cb = TRUE) |>
   as_tibble() |>
-  select(CBSAFP = GEOID, CBSA_name = NAME) |>
-  mutate(cbsa_name_short = sub("^([^-/]+?)(?:[-/][^,]*)?,\\s*([A-Z]{2}).*$",
-                                "\\1, \\2", CBSA_name))
+  select(metro_area = GEOID, metro_name = NAME) |>
+  mutate(metro_name_short = sub("^([^-/]+?)(?:[-/][^,]*)?,\\s*([A-Z]{2}).*$",
+                                "\\1, \\2", metro_name))
 
 # Helper: read one Geocorr file and return a PUMA → CBSA table
 read_geocorr <- function(file, puma_col, vintage) {
@@ -133,7 +143,7 @@ read_geocorr <- function(file, puma_col, vintage) {
     ungroup() |>
     rename(STATEFIP = state, PUMA = all_of(puma_col), county_fips = county) |>
     left_join(county_cbsa, by = "county_fips") |>
-    select(STATEFIP, PUMA, CBSAFP) |>
+    select(STATEFIP, PUMA, metro_area) |>
     mutate(puma_vintage = vintage)
 }
 
@@ -173,13 +183,13 @@ gc()
 ## ── 3. TOP 100 CBSAs ─────────────────────────────────────────────────────────
 # Identical CBSA set as in SEHTestACS2s_dataprepACS.R (2020 boundaries, 2024 population).
 
-top100_cbsa <- unique(acs$CBSAFP)
+metro_cbsas <- unique(acs$metro_area)
 
 pums <- pums |>
-  filter(!is.na(CBSAFP), CBSAFP %in% top100_cbsa) |>
-  left_join(cbsa_names, by = "CBSAFP")
+  filter(!is.na(metro_area), metro_area %in% metro_cbsas) |>
+  left_join(cbsa_names, by = "metro_area")
 
-rm(top100_cbsa, cbsa_names)
+rm(metro_cbsas, cbsa_names)
 
 
 ## ── 4. MISSING-VALUE RECODING ────────────────────────────────────────────────
@@ -199,7 +209,17 @@ pums <- pums |>
                        NA_real_, as.double(POVERTY)),
     # RENTGRS: 0 = owner / not applicable
     RENTGRS  = if_else(as.integer(OWNERSHP) != 2L,
-                       NA_real_, as.double(RENTGRS))
+                       NA_real_, as.double(RENTGRS)),
+    # RENT: contract rent (excl. utilities); 0 = owner / not applicable
+    RENT     = if_else(as.integer(OWNERSHP) != 2L,
+                       NA_real_, as.double(RENT)),
+    # Utility cost variables (owner-occupied units): 0 = NIU (renters/not applicable),
+    # 1 = no charge or included in condo fee. Both map to zero cost.
+    # COSTELEC, COSTGAS, COSTWATR: monthly USD; COSTFUEL: annual USD.
+    COSTELEC = if_else(as.integer(COSTELEC) <= 1L, 0, as.double(COSTELEC)),
+    COSTGAS  = if_else(as.integer(COSTGAS)  <= 1L, 0, as.double(COSTGAS)),
+    COSTWATR = if_else(as.integer(COSTWATR) <= 1L, 0, as.double(COSTWATR)),
+    COSTFUEL = if_else(as.integer(COSTFUEL) <= 1L, 0, as.double(COSTFUEL))
   )
 
 
@@ -209,7 +229,8 @@ pums <- pums |>
   mutate(
     # Inflation-adjusted monetary variables (1999 USD)
     hhincome_real = HHINCOME * CPI99,
-    rentgrs_real  = RENTGRS  * CPI99,
+    rentgrs_real  = RENTGRS  * CPI99,   # gross rent (incl. utilities); burden measures
+    rent_real     = RENT     * CPI99,   # contract rent (excl. utilities); quality proxy
     valueh_real   = VALUEH   * CPI99,
     inctot_real   = INCTOT   * CPI99,
 
@@ -250,7 +271,7 @@ pums <- pums |>
 
 # Income top-coding within YEAR × CBSA at p99
 pums <- pums |>
-  group_by(YEAR, CBSAFP) |>
+  group_by(YEAR, metro_area) |>
   mutate(
     hhincome_real = pmin(hhincome_real,
                          quantile(hhincome_real, 0.99, na.rm = TRUE))
@@ -265,35 +286,29 @@ pums <- pums |>
     college       = as.integer(as.integer(EDUC) >= 10L)
   )
 
-# Housing quality: z-score within YEAR × CBSA × tenure
-# Renters: gross rent; owners: home value.
+# recent_mover flag: used by SEHTestACS3_citylevel.R when computing quality_rc
+# (renters standardised from recent movers only to mitigate rent control distortions).
+# quality and quality_rc are computed in SEHTestACS3_citylevel.R where the
+# metro × year cap rate is available to put owner value on a monthly-cost scale
+# comparable to gross rent before standardising.
 pums <- pums |>
-  group_by(YEAR, CBSAFP, renter) |>
-  mutate(quality = if_else(
-    renter == 1L,
-    as.numeric(scale(rentgrs_real)),
-    as.numeric(scale(valueh_real))
-  )) |>
-  ungroup()
+  mutate(recent_mover = renter == 1L & as.integer(MOVEDIN) >= YEAR - 2L)
 
-# Robustness quality: renters standardised using recent movers only
-# (MOVEDIN >= YEAR - 2) to mitigate rent control distortions.
+
+## ── 5b. OWNER UTILITY COSTS ──────────────────────────────────────────────────
+# RENTGRS (gross rent) already includes utilities for renters. To put the
+# owner side on the same footing, sum the separately-reported utility costs
+# and deflate to 1999 USD. NA is assigned to renters (no separate utility bill).
+# COSTFUEL is an annual amount in the ACS (÷ 12 converts to monthly).
+
 pums <- pums |>
-  group_by(YEAR, CBSAFP) |>
   mutate(
-    recent_mover = renter == 1L & as.integer(MOVEDIN) >= YEAR - 2L,
-    quality_rc   = if_else(
+    util_monthly_real = if_else(
       renter == 0L,
-      quality,
-      if_else(
-        recent_mover,
-        (rentgrs_real - mean(rentgrs_real[recent_mover], na.rm = TRUE)) /
-          sd(rentgrs_real[recent_mover], na.rm = TRUE),
-        NA_real_
-      )
+      (COSTELEC + COSTGAS + COSTWATR + COSTFUEL / 12) * CPI99,
+      NA_real_
     )
-  ) |>
-  ungroup()
+  )
 
 
 ## ── 6. SELECT AND SAVE ───────────────────────────────────────────────────────
@@ -301,7 +316,7 @@ pums <- pums |>
 pums <- pums |>
   select(
     # Identifiers
-    YEAR, SERIAL, CBSAFP, CBSA_name, cbsa_name_short, STATEFIP, PUMA, PUMA_id, puma_vintage,
+    YEAR, SERIAL, metro_area, metro_name, metro_name_short, STATEFIP, PUMA, PUMA_id, puma_vintage,
     # Survey design weights
     HHWT, PERWT, CLUSTER, STRATA,
     # Housing unit
@@ -311,9 +326,10 @@ pums <- pums |>
     # CPI99 retained so city-level scripts can deflate raw HHINCOME without top-coding
     HHINCOME, CPI99, hhincome_real, equiv_income, log_equiv_inc,
     RENTGRS,  rentgrs_real, rent_to_inc,
+    RENT,     rent_real,
     VALUEH,   valueh_real,  val_to_inc,
-    # Housing quality proxies
-    quality, quality_rc, recent_mover,
+    # recent_mover flag and owner utility costs (quality computed in script 3)
+    recent_mover, util_monthly_real,
     # Household head (person-level)
     AGE, SEX, RELATE, race_eth, RACE, HISPAN, EDUC, college,
     OCC2010, EMPSTAT,

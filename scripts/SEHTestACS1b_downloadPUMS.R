@@ -36,7 +36,12 @@
 #   OWNERSHP    Tenure  (1 = owned/buying, 2 = rented)
 #   HHINCOME    Total household income past 12 months
 #   RENTGRS     Gross monthly rent incl. utilities  (renters only)
-#               → rent-to-income ratio computed in data prep: (RENTGRS*12) / HHINCOME
+#               → rent-to-income ratio and expenditure measures use gross rent
+#   RENT        Contract monthly rent excl. utilities  (renters only)
+#               → quality proxy and quality-based Gini use contract rent, which
+#                 reflects the market price of the unit itself without the ambiguous
+#                 utility cost signal (larger unit → higher utilities, but also
+#                 poorly maintained unit → higher utilities)
 #   ROOMS       Number of rooms
 #   BEDROOMS    Number of bedrooms
 #   NUMPREC     Number of person records in housing unit  (→ crowding: NUMPREC / ROOMS)
@@ -45,6 +50,13 @@
 #   KITCHEN     Kitchen or cooking facilities  (2 = lacking complete kitchen)
 #   PLUMBING    Plumbing facilities             (3 = lacking complete plumbing)
 #   VALUEH      Property value  (owners only; quality proxy complementing RENTGRS)
+#   COSTELEC    Monthly electricity cost  (owners; 0 = NIU, 1 = no charge/in fees)
+#   COSTGAS     Monthly gas cost          (owners; 0 = NIU, 1 = no charge/in fees)
+#   COSTWATR    Monthly water/sewer cost  (owners; 0 = NIU, 1 = no charge/in fees)
+#   COSTFUEL    Annual fuel/oil cost      (owners; 0 = NIU, 1 = no charge/in fees)
+#               → util_monthly_real = (COSTELEC + COSTGAS + COSTWATR + COSTFUEL/12) × CPI99
+#               Added to imputed rent for owners in pooled housing cost measures so
+#               that owner costs are comparable to gross rent (RENTGRS includes utilities).
 #
 # PERSON  (used for household head: PERNUM == 1)
 #   PERNUM      Person number within household
@@ -82,9 +94,9 @@ pums_vars <- c(
   # geography & survey design
   "STATEFIP", "PUMA", "HHWT", "PERWT", "CLUSTER", "STRATA", "CPI99",
   # housing unit
-  "GQ", "OWNERSHP", "HHINCOME", "RENTGRS",
+  "GQ", "OWNERSHP", "HHINCOME", "RENTGRS", "RENT",
   "ROOMS", "BEDROOMS", "NUMPREC", "UNITSSTR", "BUILTYR2", "KITCHEN", "PLUMBING",
-  "VALUEH",
+  "VALUEH", "COSTELEC", "COSTGAS", "COSTWATR", "COSTFUEL",
   # person (head of household)
   "PERNUM", "RELATE", "AGE", "SEX", "RACE", "HISPAN",
   "EDUC", "OCC2010", "EMPSTAT", "INCTOT", "POVERTY", "MIGRATE1", "MOVEDIN"

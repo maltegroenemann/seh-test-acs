@@ -1,0 +1,1138 @@
+---
+title: "A Socio-Economic Model of Residential Segregation, Neighborhood Change and Housing Inequality"
+subtitle: "Empirical Analysis (ACS PUMS): Test of selected Hypotheses"
+author: "Malte Grönemann"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo    = FALSE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error   = FALSE,
+                      out.width = "100%")
+
+# Packages
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggcorrplot)
+library(fixest)
+library(modelsummary)
+library(latex2exp)
+library(kableExtra)
+
+# Plotting
+cb_palette <- c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+lines <- c("solid", "twodash", "longdash", "dotdash", "dotted")
+shapes <- c(0, 1, 2, 5, 6)
+
+# File Paths
+# TODO for replication: change paths
+# local paths for development
+#data_dir <- "~/Projects/SEHTestACS/data/"
+#results_dir <- "../results/"
+# paths at HELIX HPC
+data_dir <- "./data/"
+results_dir <- "./results/"
+
+# Data
+pums <- read_parquet(paste0(data_dir, "pums_analysis.parquet")) |>
+  mutate(year = as.integer(YEAR),
+         # race_eth: nhwhite as reference category
+         race_eth = factor(race_eth, levels = c("nhwhite", "nhblack", "hispanic", "nhother"))
+         )
+
+acs <- read_parquet(paste0(data_dir, "acs_metro.parquet"))
+
+metro_vars <- read_parquet(paste0(data_dir, "metro_vars.parquet"))
+```
+
+
+# Rent/Housing Segregation > Income Segregation
+
+The formal model produces always more unevenly distrbuted features of houses in space than in population. Because investments into housing quality are based on neighborhood averages, the spatial distribution of housing quality is very smooth and quality is very similar within each neighborhood. Characteristics of the population of a neighborhood are less homogenous within neighborhoods as moves are noisier: a household might be able to afford a higher-utility unit in a different neighborhood but it is already occupied by another household, so they stay at the currently best available option and do not move to the housing unit that maximizes their utility and create perfect segregation. As rent and home value are monetary expressions of the desirability of a housing unit and therefore depend on the neighborhood, they show high spatial unevenness as well. The first hypothesis therefore states:
+
+> Rent and Housing Quality are more unequally distributed in space within cities than household income.
+
+Spatial unevenness is measured by the rank-order information theory index $H^R$ (Reardon & Bischoff 2011) for the continuous variables income, contract rent, and home value, and by the binary Theil $H$ for the categorical variable tenure. Both indices are bounded $[0,1]$ and scale-independent: $H^R$ is robust to bracket boundary shifts and the absolute level of the variable, so cross-city and over-time comparisons are valid without deflating to constant dollars. The two indices are conceptually consistent — $H^R$ for a binary variable reduces exactly to binary $H$ — but not identical: $H^R$ summarises segregation across the full distributional gradient by integrating binary $H$ values across all possible cutpoints, whereas $H$ for tenure captures a single renter/owner split. Comparisons between $H^R$ and $H$ are therefore meaningful as measures of overall spatial unevenness but should not be interpreted as the same underlying quantity. A further difference in universe should be noted: $H_{inc}$ is computed over all households, whereas $H_{rent}$ covers only cash-rent-paying renters (B25056) and $H_{val}$ only owner-occupiers (B25075). In principle this could inflate the housing indices if renters or owners are already more spatially concentrated as subpopulations. In practice, however, $H^R$ is distribution-invariant — it captures how unevenly the *within-universe* distribution of rents or values is spread across tracts — so the comparison remains meaningful as a test of whether each housing dimension is more spatially unequal than income within its respective population.
+
+In the US, the housing market is not only characterized by income segregation but also racial segregation. And the former (in combination with group differences in income) seems to be less a cause for the latter as often assumed. Instead, historical patterns of racially segregated neighborhoods reproduce itself (Krysan and Crowder 2017), effectively creating a segmented housing market. To see whether these relationships hold within race groups, I compare income and tenure segregation by three race groups: non-hispanic White, non-hispanic Black, and Hispanic/Latino. Home values and rents are not available as brackets separated by race (at least not in the publicly accessible ACS data) so that I cannot compare income segregation to rent/value segregation within race groups.
+
+The following plot shows the proportion of metro area x years where rent, value, or tenure segregation exceed segregation by household income, first in general (upper panel) and then separated by race (lower panel)
+
+```{r housingseg_barplot}
+metro_vars |>
+  summarize(rent_greater_inc       = mean(H_rent > H_inc, na.rm = TRUE),
+            value_greater_inc      = mean(H_val > H_inc, na.rm = TRUE),
+            tenure_greater_incp50  = mean(H_tenure > H_inc_p50, na.rm = TRUE),
+            tenure_greater_inc_nhw = mean(H_tenure_nhw > H_inc_nhw_p50, na.rm = TRUE),
+            tenure_greater_inc_nhb = mean(H_tenure_nhb > H_inc_nhb_p50, na.rm = TRUE),
+            tenure_greater_inc_his = mean(H_tenure_his > H_inc_his_p50, na.rm = TRUE)) |>
+  pivot_longer(contains("_greater_"),
+               names_to = "comparison",
+               values_to = "percent") |>
+  mutate(comparison = forcats::fct_reorder(comparison, percent, .fun = mean, na.rm = TRUE),
+         group = if_else(comparison %in% c("tenure_greater_inc_nhw", "tenure_greater_inc_nhb", "tenure_greater_inc_his"), "Within-Race", "General")) |>
+  ggplot() +
+  aes(y = comparison,
+      x = percent,
+      fill = comparison) +
+  geom_col() +
+  geom_vline(xintercept = 1, colour = "red") +
+  facet_grid(rows = vars(group),
+             scales = "free_y",
+             space = "free_y") +
+  geom_text(aes(label = paste0(round(percent * 100, digits = 2), "%"),
+            x = 0.1, y = comparison)) +
+  labs(x = NULL, y = NULL, colour = NULL, shape = NULL) +
+  scale_y_discrete(labels = c("rent_greater_inc" = TeX("Contract Rent $H^R$ > Household Income $H^R$"),
+                              "value_greater_inc" = TeX("Home Value $H^R$ > Household Income $H^R$"),
+                              "tenure_greater_incp50" = TeX("Tenure $H$ > Household Income $H(0.5)$"),
+                              "tenure_greater_inc_nhw" = TeX("Tenure $H$ > Household Income $H(0.5)$: Non-Hispanic White"),
+                              "tenure_greater_inc_nhb" = TeX("Tenure $H$ > Household Income $H(0.5)$: Non-Hispanic Black"),
+                              "tenure_greater_inc_his" = TeX("Tenure $H$ > Household Income $H(0.5)$: Hispanic"))) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_fill_manual(values = cb_palette) +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+The plot shows that in the vast majority of metro-years, the evenness measures are higher for home value / contract rent / tenure than for household income. In the overall measurement and for Non-Hispanic Whites, less than 2.5% of metro-years show higher housing segregation than income segregation. For Non-Hispanic Blacks and Hispanics, the within-race comparison also shows that the vast majority of city-years have higher tenure than income segregation. But values fall to just over 80% in contrast to the more than 97% in the other comparisons. 
+
+For the cases where not all metropolitan areas have higher housing segregation than income segregation, I test whether we can reject the null hypothesis that the true proportion in the population is 1 based on the data. Although this is somewhat of a fallacy, as one metro where this is the case disproves the hypothesis, it is still insightful to see how strong this fact is. I test the hypothesis $H_0: \pi = 1$ using an intercept-only linear probability model comparing tenure $H$ and income $H(0.5)$. This way, we do not want to reject the null hypothesis to get support for the model. Because proportions are bounded between 0 and 1, the alternate hypothesis needs to be $H_1: \pi < 1$ but the LPM performs a two-sided test. We therefore need to double p-values in the interpretation.
+
+```{r seg_diff_tests}
+dv_row_seg_diff <- data.frame(rbind(c(
+  "Sample",
+  "All households", "NH White", "NH Black", "Hispanic"
+)))
+attr(dv_row_seg_diff, "position") <- 1
+
+modelsummary(
+  list("(1)" = feols(I((H_tenure  > H_inc_p50)- 1L) ~ 1,
+                     cluster = ~metro_area + year, data = metro_vars),
+       "(2)" = feols(I((H_tenure_nhw > H_inc_nhw_p50) - 1L) ~ 1,
+                     cluster = ~metro_area + year, data = metro_vars),
+       "(3)" = feols(I((H_tenure_nhb > H_inc_nhb_p50) - 1L) ~ 1,
+                     cluster = ~metro_area + year, data = metro_vars),
+       "(4)" = feols(I((H_tenure_his > H_inc_his_p50) - 1L) ~ 1,
+                     cluster = ~metro_area + year, data = metro_vars)),
+  add_rows    = dv_row_seg_diff,
+  estimate    = "{estimate}{stars}",
+  statistic   = c("({std.error})", "p {p.value}"),
+  coef_rename = c("(Intercept)" = "Proportion − 1"),
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs"),
+  output      = "html"
+)
+```
+
+The intercept-only LPM confirms the result that housing segregation exceeds income segregation overwhelmingly for Whites and in the overall assessment. The doubled p-value in both cases exceed ten percent and the proportion is therefore not significantly different from 1. But for Blacks and Hispanics, the difference is sizeable and significant.
+
+I interpret these findings as tentative support for the model. In general, features of the housing stock appear to be more unevenly placed in space as characteristics of households. I deem this hypothesis not a strong hypothesis though as there are several limitations to it, both from the working of the simulation model and the available empirical data. First, the ABM simulated features of the housing unit with only one variable, housing quality, and all households only differ in income and status, not in size and composition. In reality, a large part of rent and value depend on the size of the housing unit and the size and layout of the home needs to fit the household composition. A rich couple might occupy a very high quality loft that costs the same as a decent single family home. The price of a home and their income can mean very different things to different households with different needs. But there are no (spatial) information on price per square meter or equivalence weighted income in the ACS tables, whose comparison might approximate the hypothesis better. However, unit size is endogenous to the developers' decision and to be able to afford a home, total household income income matters, not equivalence weighted income. The shown comparison is therefore internally consistent and every comparison would suffer from an endogeneity problem. Second, the ABM models segregation as a self-organizing process while in reality, building codes and zoning laws could enforce the spatial uneveness of tenure and prices. But as such laws may be a strategy of existing homeowners to secure their assets (Rothwell and Massey 2010), regulations might be passed or changed after an endogenous process of segregation, again creating an endogeneity/simultaneity problem. As a bottom line, the empirical observation is mostly in line with the empirical expectation derived from the model and does not outright refuse it. The question why this pattern differs for racial minorities is an interesting question for further research though.
+
+
+# Segregation Moderates Income Inequality → Housing Inequality
+
+The second city-level hypothesis tests whether residential segregation moderates the relationship between income inequality and housing cost inequality. High income inequality alone does not mechanically produce dispersed rents and home values: landlords base investment decisions on local neighborhood conditions rather than city-wide income distributions, so the link from income inequality to housing inequality runs through the spatial sorting of households into neighborhoods with different average incomes. While it is straightforward that a larger spread of incomes in a city result in a wider spread of housing quality and prices, my model motivates the new hypothesis that this relationship is moderated by residential segregation. I therefore test the following interaction:
+
+> In more segregated cities, income inequality translates more strongly into inequality in rents and home values.
+
+I derive this hypothesis from the city-level inequality analysis in Part IIIb of the hypotheses experiment. In the simulation, the moderating effect of segregation appears clearly when housing quality is the dependent variable, but not when rent is the dependent variable. This is by design: in the model, rent is monotone in a unit’s utility rank, so its scale is determined entirely by the income distribution and cardinal differences in unit quality never enter rent — only their ordering does. In empirical data, cardinal quality differences are capitalized into rents, so I expect the interaction to emerge with both dependent variables.
+
+
+## Operationalization of Housing Quality Inequality
+
+Housing quality is a multi-dimensional construct, even if the ABM represents it as a single variable. In reality, quality depends on a variety of unit attributes: floor size, number of rooms, appliances and infrastructure, building age and style, and amenities such as a balcony, garden, or fireplace. What constitutes a quality home also varies across households. Rather than constructing an index from such attributes, I use market prices as a proxy. Following the logic of hedonic pricing (Rosen 1974), prices aggregate the value households attach to a unit’s full bundle of attributes — an approach standard in housing economics (Chau and Chin 2003; Sirmans et al. 2005).
+
+I measure housing cost inequality with a Gini coefficient computed from housing costs pooled across renters and owners within each metro area × year in the PUMS data. Pooling both tenure groups is necessary to capture two distinct dimensions simultaneously: *within-tenure* inequality (the spread of rents among renters, or of values among owners) and the *between-group* gap (the cost difference between renting and owning). A within-tenure analysis would be biased if cities differ in their renter–owner split and if the quality of rental and owner-occupied stock diverges. Because the ABM predicts that segregation translates income inequality into housing inequality by sorting households into differentially desirable neighbourhoods regardless of tenure, the dependent variable should reflect the full cross-tenure distribution of housing costs.
+
+The central measurement challenge is that renters and owners face prices on incompatible scales: monthly contract rent for renters and total market value for owners. I exclude utility costs from both measures, as utility expenditure is a mixed signal — higher water and energy costs can reflect larger homes or poor insulation rather than housing quality. I convert home values to monthly user costs using the metro-level rent-to-price ratio as the capitalization rate — a standard approach in the empirical literature on housing costs (Himmelberg, Mayer, and Sinai 2005; Davis, Lehnert, and Martin 2008):
+
+$$u_i = v_i \times \hat{r}_{mt} \;/\; 12,$$
+
+where $v_i$ is the inflation-adjusted home value (`valueh_real`, 1999 USD) and $\hat{r}_{mt}$ is a metro- and wave-specific capitalization rate.
+
+The underlying logic is that in equilibrium a marginal household is indifferent between renting and owning, so the annual rent for a unit equals its owner’s user cost: home value $P$ times a cap rate $r$. The cap rate summarizes the net annual cost of owning per dollar of value — forgone returns on tied-up capital, property taxes, maintenance and depreciation, and a risk premium, less expected appreciation and any tax advantages.
+
+Because it is rarely possible to observe both the rent and the value of the same unit simultaneously, I estimate the cap rate from metro-level medians. Cross-metro variation in $\hat{r}$ is substantively meaningful: the rent-to-price ratio is systematically lower in supply-constrained metros, and I preserve that variation by estimating a cap rate for every metro area in every ACS wave from PUMS weighted median rents and home values (household weight HHWT):
+
+$$\hat{r}_{mt} = 12 \;\times\; \widetilde{\mathrm{rent}}_{mt} \;/\; \widetilde{\mathrm{value}}_{mt}.$$
+
+The factor of 12 follows from the standard real-estate definition of the annual gross yield: $r = \text{annual rent} / \text{value} = 12 \times \text{monthly rent} / \text{value}$. Dividing by 12 in the user-cost formula then recovers a monthly figure, so the two factors cancel and the imputed cost simplifies to
+
+$$u_i = v_i \times \widetilde{\mathrm{rent}}_{mt} / \widetilde{\mathrm{value}}_{mt}.$$
+
+**Key assumption.** The formula embeds the assumption that the unit with median rent would sell for the median price, and that this relationship holds proportionally across the full within-metro quality distribution: a home worth twice the median is assumed to rent for twice the median rent. This is a standard first-order approximation but is unlikely to hold exactly. Not only does the quality of the owner-occupied and rental stock differ, but luxury units also typically command a lower gross yield than entry-level units (the cap rate declines with quality), so the formula overstates imputed costs at the top of the value distribution and understates them at the bottom. The resulting Gini is therefore somewhat inflated relative to the true housing cost distribution. This bias cannot be eliminated without observing what owner-occupied units would rent for in the current market, which is not available in ACS or PUMS. The pooled monthly housing cost is then
+
+$$c_i = \begin{cases} \text{rent\_real}_i & \text{renter} \\ v_i \times \hat{r}_{mt} \;/\; 12 & \text{owner,} \end{cases}$$
+
+and `gini_housing_metro` is the HHWT-weighted Gini of $c_i$ within each CBSA × year.
+
+
+## First-Differences Model
+
+The first-differences (FD) model tests whether a rise in income inequality translates into a larger rise in housing costs in more segregated cities, directly testing the temporal mechanism by which segregation shapes how income inequality propagates through landlord and developer investment decisions.
+
+First-differencing removes all time-constant between-city heterogeneity — persistent differences between high-demand and stagnating metros — without requiring unit fixed effects. Three design choices follow from the nature of the estimand. First, the dependent variable and main predictor are differenced ($\Delta$), but income segregation enters as its *lagged level* $H^R_{m,t-5}$: it is the structural context within which income inequality changes play out, it is predetermined relative to $\Delta\text{GiniHousing}$, and as established above it barely moves within metros over the sample period. Second, all time-varying controls enter as period changes ($\Delta$) to match the estimand and absorb demand and economic shocks that could confound the interaction. Third, year fixed effects are retained as two dummies for the three inter-wave difference periods (2009→2014, 2014→2019, 2019→2024) to absorb national trends in housing cost growth. Standard errors are clustered by metro area only rather than two-way, because the FD sample contains only three period clusters. Income segregation $H^R_{m,t-5}$ is mean-centred so that the main effect of $\Delta\text{GiniInc}$ is evaluated at the average metro.
+
+Although first-differencing removes time-constant confounders, I need to account for alternative mechanisms that could generate the hypothesized pattern. For the interaction effect to be identified, both the independent variable and the moderator need to be conditionally exogenous (Nizalova and Murtazashvili 2016). Because the moderator is a lagged, predetermined level, reverse causality is not a concern for $H^R_{m,t-5}$; the residual threat is that the composition of income inequality growth differs systematically across high- and low-segregation metros in ways that also affect housing cost growth independently of the investment mechanism.
+
+I address this through three sets of controls. First, I include demand-side confounders: population growth captures compositional demand shocks from household inflows and outflows that simultaneously shift the income distribution and housing demand; because such flows are disproportionately driven by Hispanic migration in the contemporary US (Rugh and Massey 2014), I also control for the change in Hispanic population share; and unemployment rate changes capture local economic cycles that affect both income levels and housing demand expectations.
+
+Second, I add the change in multigroup racial $H$ (Non-Hispanic White, Non-Hispanic Black, Hispanic, Non-Hispanic Other) to absorb racial residential dynamics that could independently affect neighbourhood price gradients. I do *not* include the change in income segregation ($\Delta H^R_{inc}$) in the main specification, even though it is a natural candidate for an alternative-channel control. Rising income inequality likely drives increases in income segregation (Reardon and Bischoff 2011; Yavas 2019), which in turn widens the spread of neighbourhood prices — the segregation-amplification channel. Blocking it would yield a more mechanism-pure investment effect. However, the investment mechanism itself induces sorting: when housing costs become more dispersed across neighbourhoods, higher-income households sort into appreciating areas while lower-income households are confined to depreciating ones, raising income segregation as a *downstream consequence* of the very process under study. $\Delta H^R_{inc}$ therefore sits on the causal path from the mechanism to the outcome (or is jointly caused by both), making it a bad control in the sense of Angrist and Pischke (2009, ch. 3): conditioning on it absorbs part of the effect being estimated rather than isolating a competing channel. The main specification therefore estimates the total moderation effect — investment and induced sorting combined — which is the policy-relevant quantity. A model with $\Delta H^R_{inc}$ added is included in the robustness table (model 5) as a lower bound under the conservative assumption that sorting precedes rather than follows housing cost changes within the period.
+
+Third, I include two further precautionary controls. The change in renter share accounts for the compositional structure of the pooled housing cost Gini: a shift in the renter–owner mix could mechanically alter the Gini even without any change in within-tenure inequality. The change in vacancy rate captures residual housing market slack not fully absorbed by population growth and unemployment. 
+
+
+```{r housing_ineq_fd}
+metro_vars_fd <- metro_vars |>
+  arrange(metro_area, year) |>
+  group_by(metro_area) |>
+  mutate(
+    d_gini_housing      = gini_housing_metro      - lag(gini_housing_metro),
+    d_gini_housing_5pct = gini_housing_metro_5pct - lag(gini_housing_metro_5pct),
+    d_gini_housing_natl = gini_housing_metro_natl - lag(gini_housing_metro_natl),
+    d_gini_rent         = gini_rent_metro         - lag(gini_rent_metro),
+    d_gini_val          = gini_val_metro          - lag(gini_val_metro),
+    d_gini_inc          = gini_inc_metro          - lag(gini_inc_metro),
+    d_H_inc             = H_inc                   - lag(H_inc),
+    d_H_race_multi      = H_race_multi            - lag(H_race_multi),
+    d_unemp             = unemp_rate_metro        - lag(unemp_rate_metro),
+    d_vacancy           = vacancy_rate_metro      - lag(vacancy_rate_metro),
+    d_pct_renter        = pct_renter_metro        - lag(pct_renter_metro),
+    d_pct_hispanic      = pct_hispanic_metro      - lag(pct_hispanic_metro),
+    H_inc_lag           = lag(H_inc),
+    H_val_lag           = lag(H_val),
+    H_rent_lag          = lag(H_rent),
+    d_H_vac             = H_vac    - lag(H_vac),
+    H_vac_lag           = lag(H_vac),
+    d_H_tenure          = H_tenure - lag(H_tenure),
+    H_tenure_lag        = lag(H_tenure)
+  ) |>
+  ungroup() |>
+  filter(!is.na(d_gini_housing)) |>
+  mutate(
+    H_inc_lag_c    = H_inc_lag    - mean(H_inc_lag,    na.rm = TRUE),
+    H_val_lag_c    = H_val_lag    - mean(H_val_lag,    na.rm = TRUE),
+    H_rent_lag_c   = H_rent_lag   - mean(H_rent_lag,   na.rm = TRUE),
+    H_vac_lag_c    = H_vac_lag    - mean(H_vac_lag,    na.rm = TRUE),
+    H_tenure_lag_c = H_tenure_lag - mean(H_tenure_lag, na.rm = TRUE)
+  )
+
+fd_coef_names <- c(
+  "d_gini_inc"             = "\u0394Income Gini",
+  "H_inc_lag_c"            = "Income Segregation H\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_inc_lag_c" = "\u0394Income Gini \u00d7 H\u1d3f (t\u22125)",
+  "pop_growth_metro"       = "\u0394Population",
+  "d_unemp"                = "\u0394Unemployment Rate",
+  "d_pct_hispanic"         = "\u0394Hispanic Share",
+  "d_H_inc"                = "\u0394Income Segregation H\u1d3f",
+  "d_H_race_multi"         = "\u0394Multigroup Racial Segregation H",
+  "d_pct_renter"           = "\u0394Renter Share",
+  "d_vacancy"              = "\u0394Vacancy Rate"
+)
+
+cm_fd1 <- feols(d_gini_housing ~ d_gini_inc | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd2 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd3 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd4 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd5 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_inc + d_H_race_multi | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+cm_fd6 <- feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                  pop_growth_metro + d_unemp + d_pct_hispanic +
+                  d_H_inc + d_H_race_multi +
+                  d_pct_renter + d_vacancy | year,
+                data = metro_vars_fd, cluster = ~metro_area)
+
+modelsummary(
+  list(cm_fd1, cm_fd2, cm_fd3, cm_fd4, cm_fd5, cm_fd6),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year"),
+  output      = "html"
+)
+```
+
+*TODO* update: The main effect of income inequality changes ($\Delta$Income Gini) on housing cost inequality changes is positive and consistent across models. The interaction between $\Delta$Income Gini and lagged segregation $H^R_{t-5}$ is positive and substantively large, consistent with the theoretical prediction that more segregated cities translate rising income inequality into rising housing cost inequality more strongly. It does not, however, reach conventional significance thresholds.
+
+Two features of the FD design limit statistical power here. First, first-differencing removes the between-metro variance that constitutes the bulk of variation in both income inequality and segregation, leaving only the modest within-metro, period-to-period changes to identify the interaction. Second, with only three difference periods per metro and one-way metro_area clustering, degrees of freedom for the year dimension are exhausted, making the standard errors conservative. The positive direction of the interaction is nonetheless consistent across the trivariate model and the full specification with change controls — including controls specifically designed to absorb the alternative explanation that high-segregation metros are simply faster-growing cities with rising housing demand. The effect is slightly reduced in the model with controls but is still sizeable, constituting cautious support for the moderation hypothesis.
+
+### Predicted Values
+
+The plot below illustrates the moderation: predicted $\Delta$Housing Cost Gini as a function of $\Delta$Income Gini at three levels of lagged income segregation (low = $-1$ SD, mean = 0, high = $+1$ SD). All other predictors are held at zero (a no-change baseline). Year FE are absorbed. The steeper slope for high-segregation metros captures the predicted amplification effect. The prediction is based on the total-effect estimate in model 4.
+
+```{r housing_ineq_fd_pred, fig.height=4}
+h_sd     <- sd(metro_vars_fd$H_inc_lag_c, na.rm = TRUE)
+x_seq    <- seq(min(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                max(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                length.out = 100)
+h_mn_lag <- mean(metro_vars_fd$H_inc_lag, na.rm = TRUE)
+h_levels <- c(-h_sd, 0, h_sd)
+h_labels <- sprintf(c("Low ($-$1 SD, $%.3f$)",
+                       "Mean ($%.3f$)",
+                       "High ($+$1 SD, $%.3f$)"),
+                    h_levels + h_mn_lag)
+
+b <- coef(cm_fd4)
+V <- vcov(cm_fd4)[c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c"),
+                   c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c")]
+
+expand.grid(d_gini_inc = x_seq, H_inc_lag_c = h_levels) |>
+  mutate(
+    H_label = factor(H_inc_lag_c, levels = h_levels, labels = h_labels),
+    y_hat   = b["d_gini_inc"]             * d_gini_inc
+            + b["H_inc_lag_c"]            * H_inc_lag_c
+            + b["d_gini_inc:H_inc_lag_c"] * d_gini_inc * H_inc_lag_c,
+    se      = mapply(function(x, h) {
+                z <- c(x, h, x * h)
+                sqrt(as.numeric(z %*% V %*% z))
+              }, d_gini_inc, H_inc_lag_c),
+    ylo     = y_hat - 1.96 * se,
+    yhi     = y_hat + 1.96 * se
+  ) |>
+  ggplot(aes(x = d_gini_inc, colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  labs(
+    x = TeX("$\\Delta$ Income Gini"),
+    y = TeX("$\\Delta$ Housing Cost Gini")
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "seg_ineqFD.pdf"), height = 12, width = 18, units = "cm")
+```
+
+Income inequality also changes little over time within metros. The range in delta Gini over five years is only about 0.05.
+
+
+## Robustness Checks
+
+### Cap Rates and Region Fixed Effects
+
+The metro-specific $\hat{r}_{mt}$ could confound the Gini if the rent-to-price ratio itself co-varies with income inequality or segregation, creating a spurious correlation rather than a genuine measurement of housing cost inequality. As the price-to-rent ratio is affected by general conditions of the economy such as interest rates, it is plausible that there is a connection of changes in the cap rate to changes in income inequality. Two alternative cap rate assumptions are therefore carried as robustness checks:
+
+| Variant | Cap rate | What it isolates |
+|---|---|---|
+| `gini_housing_metro` | Metro×year from PUMS medians | Main specification |
+| `gini_housing_metro_5pct` | Fixed 5 % p.a. | Removes all cap rate variation |
+| `gini_housing_metro_natl` | Year-specific national rate | Removes cross-metro variation in cap rates |
+
+The two checks address distinct threats to validity. The **fixed 5 % rate** eliminates all variation in the cap rate — both cross-sectional and temporal — so any result that survives cannot be an artefact of cap rate differences between metros or waves. The value of 5 % approximates the pre-boom historical average for the U.S. owner-occupied stock (Davis, Lehnert, and Martin 2008, Loewenstein and Willen 2023). The **national cap rate** retains year-to-year temporal variation but removes cross-metro differences in rent-to-price ratios; if estimates are stable when switching from a metro to a national cap rate, the structural differences between metros is not driving the results.
+
+I also add a model with census division fixed effects. In the differenced equation, these become census division × period dummies that allow each region to have a different average change in housing cost inequality per wave. This absorbs region-specific housing market cycles that year fixed effects alone do not capture. Because the most segregated metros cluster in the Northeast and Midwest, such regional cycles could otherwise create a spurious correlation between lagged segregation and housing cost changes.
+
+I re-estimate FD 4 with the original dependent variable for comparison and exchange the dependent variable in the following models using the same specification, showing only the key coefficients.
+
+```{r housing_ineq_fd_rob}
+dv_row_fd_rob <- data.frame(rbind(c(
+  "Dependent Variable",
+  "\u0394Gini Housing (metro)", "\u0394Gini Housing (metro)",
+  "\u0394Gini Housing (5%)",    "\u0394Gini Housing (5%)",
+  "\u0394Gini Housing (US)",    "\u0394Gini Housing (US)"
+)))
+attr(dv_row_fd_rob, "position") <- 1
+
+modelsummary(
+  list(
+    "(1)" = cm_fd4,
+    "(2)" = feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(3)" = feols(d_gini_housing_5pct ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(4)" = feols(d_gini_housing_5pct ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(5)" = feols(d_gini_housing_natl ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(6)" = feols(d_gini_housing_natl ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area)
+  ),
+  add_rows    = dv_row_fd_rob,
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  output      = "html"
+)
+```
+
+### Decomposition by Tenure
+
+The pooled Gini combines within-tenure inequality with the renter/owner cost gap. To understand which component drives the moderation result, I re-estimate the FD model separately using `d_gini_rent` (renters only) and `d_gini_val` (owners only) as dependent variables. Because these measures are computed from directly observed values without any cap rate conversion, this also bypasses the imputed rent assumption entirely.
+
+Recall that the moderation hypothesis concerns how strongly a rise in income inequality translates into housing cost inequality given the level of segregation — segregation is the moderator, not the driver. With this in mind, we expect the moderation to be stronger for home values than for rents. When income inequality increases (especially at the top), in more segregated metros the gains of top earners flow into a narrow set of premium neighborhoods where high-income households are concentrated, bidding up values there. At the same time, Glaeser and Gyourko's (2005) supply asymmetry implies that low-income areas do not depreciate symmetrically — the durable housing stock decays slowly, creating a floor under low-end values. Together, concentrated appreciation at the top and sticky values at the bottom amplify how income inequality growth translates into value dispersion, more so in metros where income groups are spatially separated. The rental market absorbs the same income inequality increase more diffusely: renters are more mobile across neighbourhoods, lease contracts slow price adjustment, and the income–rent gradient is less steep to begin with.
+
+Note that null results here do not contradict the main finding: if the moderation operates primarily through the between-group channel — segregation widening the cost gap between renters and owners as groups — it would not appear in either tenure-specific Gini.
+
+```{r housing_ineq_fd_decomp}
+dv_row_decomp <- data.frame(rbind(c(
+  "Dependent Variable",
+  "\u0394Rent Gini", "\u0394Rent Gini",
+  "\u0394Value Gini", "\u0394Value Gini"
+)))
+attr(dv_row_decomp, "position") <- 1
+
+modelsummary(
+  list(
+    "(1)" = feols(d_gini_rent ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(2)" = feols(d_gini_rent ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(3)" = feols(d_gini_val  ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(4)" = feols(d_gini_val  ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area)
+  ),
+  add_rows    = dv_row_decomp,
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  output      = "html"
+)
+```
+
+The FD results confirm the asymmetry: the interaction effect for home values is substantially larger than for rents and reaches marginal significance, while the rent interaction is small and insignificant. This is consistent with the theoretical expectation above. The FD estimator identifies changes within metros over time, so the value result specifically says that in metros where income segregation was higher at the start of a period, a given increase in income inequality over that period translated into a larger widening of home value dispersion. This dynamic pattern fits the capitalisation story: rising top incomes bid up values in the premium (segregated) neighbourhoods disproportionately, while value floors in low-income areas are held up by durable housing stock. Rents, by contrast, adjust more slowly and across a more diffuse set of neighbourhoods, dampening the within-metro, within-period translation.
+
+### Robustness: Value and Rent Segregation as Alternative Moderators
+
+Income segregation ($H^R_\text{inc}$) is the theoretically motivated moderator, but its low absolute level and limited within-metro variation may reduce statistical power. We therefore replace the lagged income segregation moderator with lagged home-value segregation ($H^R_\text{val}$, $r = 0.77$ with $H^R_\text{inc}$) and lagged gross-rent segregation ($H^R_\text{rent}$, $r = 0.47$) in otherwise identical FD 4 specifications.
+
+Three caveats apply. *Endogeneity:* value and rent segregation are conceptually closer to the outcome ($\Delta$Gini Housing, which is itself a composite of rent and value dispersion), so the moderator risks being partially constitutive of the outcome rather than an independent structural condition. *Proxy validity:* at $r = 0.77$, $H^R_\text{val}$ largely substitutes for $H^R_\text{inc}$; a consistent result confirms that the two measures are interchangeable operationalisations but does not provide independent validation of the theoretical mechanism. *Conceptual distance:* at $r = 0.47$, $H^R_\text{rent}$ captures substantial variance orthogonal to income segregation, making it a less defensible proxy for the theoretical construct. The checks are therefore best understood as alternative operationalisations rather than strict robustness tests.
+
+```{r housing_ineq_fd_robseg}
+rob_fd_coef_names <- c(
+  fd_coef_names,
+  "H_val_lag_c"              = "Home-Value Seg. \u210d\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_val_lag_c"   = "\u0394Income Gini \u00d7 \u210d\u1d3f\u1d65\u2090\u2097 (t\u22125)",
+  "H_rent_lag_c"             = "Contract-Rent Seg. \u210d\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_rent_lag_c"  = "\u0394Income Gini \u00d7 \u210d\u1d3f\u1d63\u1d49\u207f\u1d57 (t\u22125)"
+)
+
+modelsummary(
+  list(
+    "(1)" = cm_fd4,
+    "(2)" = feols(d_gini_housing ~ d_gini_inc * H_inc_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(3)" = feols(d_gini_housing ~ d_gini_inc * H_val_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(4)" = feols(d_gini_housing ~ d_gini_inc * H_val_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(5)" = feols(d_gini_housing ~ d_gini_inc * H_rent_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year,
+                  data = metro_vars_fd, cluster = ~metro_area),
+    "(6)" = feols(d_gini_housing ~ d_gini_inc * H_rent_lag_c +
+                    pop_growth_metro + d_unemp + d_pct_hispanic +
+                    d_H_race_multi | year + census_division,
+                  data = metro_vars_fd, cluster = ~metro_area)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = rob_fd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  output      = "html"
+)
+```
+
+
+# Segregation Moderates Median Neighborhood Income → Vacancy Rate
+
+> In more segregated cities, the negative relationship between neighbourhood income and vacancy rates is stronger.
+
+In any self-organised segregation model, higher income segregation implies greater dispersion in neighbourhood attractiveness: neighbourhoods are more unequal, so the income–vacancy gradient should be steeper. This is a necessary implication of Schelling-type sorting mechanisms in general, not a distinctive prediction of this ABM. The test reported here therefore functions as a basic validation — the ABM must pass it, but passing it does not distinguish it from simpler models. I test this as a cross-level interaction at the tract level: tract vacancy rate is regressed on a tract income measure, the city-level income segregation index, and their interaction. Tracts are weighted by the number of housing units. Standard errors are clustered by CBSA.
+
+The main income predictor is the log ratio of tract median household income (`B19013`) to city median household income: $\ln(\text{tract median} / \text{city median})$. A value of zero means the tract is exactly at the city median; negative values indicate below-average tracts, positive values above-average tracts. This operationalisation captures within-city relative standing directly, making the variable comparable across cities without requiring city median income as a separate control. Using log absolute income with city median as an additive control would implicitly estimate the same within-city deviation but without constraining the city median coefficient to equal $-1$; expressing the ratio explicitly imposes that constraint and makes the variable's meaning transparent. The same absolute income gap means something different in cities with different overall income levels, so the ratio is the natural scale for the ABM mechanism, which concerns sorting *within* a local housing market. Year fixed effects absorb inter-wave aggregate income growth, so the cross-sectional variation in the log ratio is effectively real within each wave.
+
+The expected signs follow directly from the hypothesis. The main effect of the log income ratio should be **negative**: tracts with higher income relative to their city face stronger housing demand and therefore lower vacancy rates. The interaction `log income ratio × H^R` should also be **negative**: the marginal effect of the income ratio on vacancy is $\beta_1 + \beta_3 \cdot H^R$, so a negative $\beta_3$ means the income–vacancy gradient steepens as segregation increases — consistent with the ABM mechanism in which segregation concentrates disinvestment in the lowest-income tracts.
+
+I estimate a linear probability model (LPM) via OLS. LPM coefficients are directly interpretable as marginal effects in percentage points, and the within-estimator is consistent under high-dimensional fixed effects without the incidental-parameters correction that nonlinear GLMs require. A logit specification is reported as a robustness check below.
+
+Two fixed-effects specifications are estimated. The census-division specification (year + nine Census divisions) absorbs broad regional differences in baseline vacancy levels and housing market structure, with identification coming from cross-metro variation within regions. The CBSA specification (year + metro area) absorbs all time-constant city-level differences; the interaction `log income ratio × H^R` is then identified purely from within-metro over-time variation in the segregation index across the four ACS waves. The CBSA specification is the more demanding, but with only four waves and $H^R$ moving slowly over time, within-metro variance is limited and the census-division specification carries more power. Standard errors are clustered by CBSA.
+
+The hypothesis does not posit a causal effect of income on vacancy. Instead, both are treated as joint consequences of latent neighbourhood attractiveness: attractive neighbourhoods attract wealthier residents and face stronger housing demand, yielding lower vacancy rates. Any segregation model predicts that this co-variation is steeper in more segregated cities, where neighbourhood attractiveness is more dispersed. Controlling for observable proxies of attractiveness — amenities, distance to the CBD, housing stock quality — would therefore be controlling away the mechanism, producing a bad-control bias that attenuates the gradient we aim to document. Tract-level controls of this kind are accordingly excluded on theoretical grounds, not for lack of data.
+
+The main remaining concern is city-level confounding: shocks that shift the income–vacancy relationship across waves independently of segregation. Zoning and regulatory constraints could in principle generate an income–vacancy correlation (exclusionary zoning raises both incomes and barriers to new supply), but zoning changes extremely slowly over time and is largely absorbed by metro area or census-division FE. Time-varying metro-level controls are therefore the only necessary adjustment: income inequality (Gini) captures the spread of the within-city income distribution — a tract 20% below the city median occupies a very different relative position in a high-inequality city than in a low-inequality one, so Gini is needed even after conditioning on the ratio; Black–White segregation ($H_{bw}$) separates the effect of income segregation from concurrent racial segregation, relevant because a dual housing market by race can generate vacancies in tracts that are unavailable to potential residents of a different race regardless of income; unemployment rate, population growth, and overall vacancy rate capture demand-side market tightness, which compresses the gradient in supply-constrained markets (see robustness check below).
+
+```{r vac_conc_prep}
+# City-level weighted mean of log home value (for ratio variable, parallel to log_median_inc_metro)
+val_metro <- acs |>
+  group_by(metro_area, year) |>
+  summarise(log_median_val_metro = weighted.mean(log(ifelse(median_val > 0, median_val, NA_real_)),
+                                                  units_tot, na.rm = TRUE),
+            .groups = "drop")
+
+acs_vac <- acs |>
+  filter(!is.na(log_median_inc), !is.na(vac_rate), units_tot > 0) |>
+  left_join(metro_vars |> select(metro_area, year,
+                            H_inc, H_val, H_rent,
+                            log_median_inc_metro,
+                            gini_inc_metro, H_bw,
+                            unemp_rate_metro, vacancy_rate_metro, pop_growth_metro,
+                            census_division),
+            by = c("metro_area", "year")) |>
+  left_join(val_metro, by = c("metro_area", "year")) |>
+  mutate(
+    log_inc_ratio = log_median_inc - log_median_inc_metro,
+    log_val_ratio = log(ifelse(median_val > 0, median_val, NA_real_)) - log_median_val_metro
+  )
+```
+
+```{r vac_conc_models}
+vc_controls <- ~ gini_inc_metro + H_bw +
+                  unemp_rate_metro + vacancy_rate_metro + pop_growth_metro
+
+vc1_rfe <- feols(vac_rate ~ log_inc_ratio                          | year + census_division,
+                 data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc2_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc                  | year + census_division,
+                 data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc3_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls] | year + census_division,
+                 data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc1 <- feols(vac_rate ~ log_inc_ratio                          | year + metro_area,
+             data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc2 <- feols(vac_rate ~ log_inc_ratio * H_inc                  | year + metro_area,
+             data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc3 <- feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls] | year + metro_area,
+             data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_coef_names <- c(
+  "log_inc_ratio"        = "Log Income Ratio (Tract/City)",
+  "H_inc"                = "Income Segregation H\u1d3f",
+  "log_inc_ratio:H_inc"  = "Log Income Ratio \u00d7 H\u1d3f",
+  "gini_inc_metro"       = "Income Gini",
+  "H_bw"                 = "Black-White Segregation H",
+  "unemp_rate_metro"     = "Unemployment Rate",
+  "vacancy_rate_metro"   = "Overall Vacancy Rate",
+  "pop_growth_metro"     = "Population Growth"
+)
+
+modelsummary(
+  list(vc1_rfe, vc1, vc2_rfe, vc2, vc3_rfe, vc3),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared", "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+```{r vac_conc_plot}
+b_vc  <- coef(vc3)
+V_vc  <- vcov(vc3)
+
+x_seq    <- seq(quantile(acs_vac$log_inc_ratio, 0.01, na.rm = TRUE),
+                quantile(acs_vac$log_inc_ratio, 0.99, na.rm = TRUE),
+                length.out = 100)
+h_mn_vc  <- weighted.mean(acs_vac$H_inc,             acs_vac$units_tot, na.rm = TRUE)
+h_sd_vc  <- sd(acs_vac$H_inc, na.rm = TRUE)
+h_levels_vc <- h_mn_vc + c(-h_sd_vc, 0, h_sd_vc)
+h_labels_vc <- sprintf(c("Low ($-$1 SD, $%.3f$)",
+                          "Mean ($%.3f$)",
+                          "High ($+$1 SD, $%.3f$)"),
+                        h_levels_vc)
+
+newdata_vc <- expand.grid(
+  log_inc_ratio      = x_seq,
+  H_inc              = h_levels_vc,
+  gini_inc_metro     = weighted.mean(acs_vac$gini_inc_metro,     acs_vac$units_tot, na.rm = TRUE),
+  H_bw               = weighted.mean(acs_vac$H_bw,               acs_vac$units_tot, na.rm = TRUE),
+  unemp_rate_metro   = weighted.mean(acs_vac$unemp_rate_metro,   acs_vac$units_tot, na.rm = TRUE),
+  vacancy_rate_metro = weighted.mean(acs_vac$vacancy_rate_metro, acs_vac$units_tot, na.rm = TRUE),
+  pop_growth_metro   = weighted.mean(acs_vac$pop_growth_metro,   acs_vac$units_tot, na.rm = TRUE),
+  year               = as.integer(names(which.max(table(acs_vac$year)))),
+  metro_area         = names(which.max(table(acs_vac$metro_area)))
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels_vc, labels = h_labels_vc))
+
+key_vars_vc <- c("log_inc_ratio", "H_inc", "log_inc_ratio:H_inc")
+V_vc_key    <- V_vc[key_vars_vc, key_vars_vc]
+
+newdata_vc <- newdata_vc |>
+  mutate(
+    y_hat = predict(vc3, newdata = newdata_vc),
+    se_p  = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_vc_key %*% z))
+            }, log_inc_ratio, H_inc),
+    ylo   = y_hat - 1.96 * se_p,
+    yhi   = y_hat + 1.96 * se_p
+  )
+
+ggplot(newdata_vc, aes(x = exp(log_inc_ratio),
+                       colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels_vc, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels_vc, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels_vc, TeX)) +
+  scale_x_continuous(labels = scales::label_percent()) +
+  scale_y_continuous(labels = scales::label_percent()) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Tract Income as Share of City Median",
+    y = "Predicted Vacancy Rate"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "vac_income_seg.pdf"), height = 12, width = 18, units = "cm")
+```
+
+## Income Composition and Housing Quality as Dual Attractiveness Channels
+
+Neighbourhood attractiveness in the ABM has two components: who lives there (income composition) and the quality of the housing stock (driven by the investment cycle). The previous section established that income composition — measured by the log tract-to-city income ratio — shows the predicted gradient moderation. Here I test whether housing quality, measured by the log ratio of tract to city median home value ($\ln(\text{tract median value} / \text{city median value})$), shows the same pattern, and whether both channels operate jointly.
+
+Note that `B25077` (median home value) is reported only for owner-occupied units; tracts with no owner-occupied housing have missing values and are excluded from these models. Tracts with valid home values are a selected sample, and the estimates should be interpreted accordingly.
+
+The expected signs mirror those from the first subsection. The main effect of the log home value ratio should be **negative**: tracts with higher home values relative to their city reflect stronger investment and demand, yielding lower vacancy rates. The interaction `log value ratio × H^R` should also be **negative**: more segregated cities produce steeper home value gradients, concentrating disinvestment and vacancy in the lowest-value tracts. Both interactions in model (5) are therefore expected to be negative.
+
+Five specifications are estimated in sequence. Models (1) and (2) establish the additive and tract-level interactive effects of the two ratio variables before introducing the city-level moderator. Models (3) and (4) add the cross-level interaction of income segregation with each ratio in turn. Model (5) is the joint specification with both cross-level interactions, directly testing whether income composition and housing quality are each independently moderated by income segregation. All specifications include the full set of metro-level controls and are estimated with both census-division and metro area fixed effects.
+
+```{r vac_val_models}
+vc_val_coef_names <- c(
+  "log_inc_ratio"               = "Log Income Ratio (Tract/City)",
+  "log_val_ratio"               = "Log Value Ratio (Tract/City)",
+  "H_inc"                       = "Income Segregation H\u1d3f",
+  "log_inc_ratio:log_val_ratio" = "Log Income Ratio \u00d7 Log Value Ratio",
+  "log_inc_ratio:H_inc"         = "Log Income Ratio \u00d7 H\u1d3f",
+  "log_val_ratio:H_inc"         = "Log Value Ratio \u00d7 H\u1d3f",
+  "gini_inc_metro"              = "Income Gini",
+  "H_bw"                        = "Black-White Segregation H",
+  "unemp_rate_metro"            = "Unemployment Rate",
+  "vacancy_rate_metro"          = "Overall Vacancy Rate",
+  "pop_growth_metro"            = "Population Growth"
+)
+
+vc_v1_rfe <- feols(vac_rate ~ log_inc_ratio + log_val_ratio + .[vc_controls]                   | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v1     <- feols(vac_rate ~ log_inc_ratio + log_val_ratio + .[vc_controls]                   | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v2_rfe <- feols(vac_rate ~ log_inc_ratio * log_val_ratio + .[vc_controls]                   | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v2     <- feols(vac_rate ~ log_inc_ratio * log_val_ratio + .[vc_controls]                   | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v3_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio + .[vc_controls]           | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v3     <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio + .[vc_controls]           | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v4_rfe <- feols(vac_rate ~ log_inc_ratio + log_val_ratio * H_inc + .[vc_controls]           | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v4     <- feols(vac_rate ~ log_inc_ratio + log_val_ratio * H_inc + .[vc_controls]           | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+vc_v5_rfe <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls]  | year + census_division,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+vc_v5     <- feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls]  | year + metro_area,
+                   data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+
+modelsummary(
+  list(
+    "(1) Div FE"   = vc_v1_rfe, "(1) Metro FE" = vc_v1,
+    "(2) Div FE"   = vc_v2_rfe, "(2) Metro FE" = vc_v2,
+    "(3) Div FE"   = vc_v3_rfe, "(3) Metro FE" = vc_v3,
+    "(4) Div FE"   = vc_v4_rfe, "(4) Metro FE" = vc_v4,
+    "(5) Div FE"   = vc_v5_rfe, "(5) Metro FE" = vc_v5
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_val_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared", "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+## Robustness: Value and Rent Segregation as Alternative Moderators
+
+The joint model above uses income segregation ($H^R_\text{inc}$) as the city-level moderator for both the income and home value ratio. $H^R_\text{val}$ and $H^R_\text{rent}$ are alternative operationalisations of the segregation moderator: they tend to have higher levels and variance than $H^R_\text{inc}$, which may improve statistical power. However, value and rent segregation are themselves outcomes of the housing market — they are downstream of the sorting and investment processes the ABM models — so using them as moderators risks endogeneity. These are alternative operationalisations rather than independent robustness tests. The structure of the models mirrors model (5) from the previous section; only the segregation moderator changes.
+
+```{r vac_conc_robseg}
+vc_rob_coef_names <- c(
+  "log_inc_ratio"               = "Log Income Ratio (Tract/City)",
+  "log_val_ratio"               = "Log Value Ratio (Tract/City)",
+  "H_inc"                       = "Income Segregation H\u1d3f",
+  "H_val"                       = "Home-Value Segregation H\u1d3f\u1d5b\u1d43\u1d4d",
+  "H_rent"                      = "Gross-Rent Segregation H\u1d3f\u1d63\u1d49\u207f\u1d57",
+  "log_inc_ratio:H_inc"         = "Log Income Ratio \u00d7 H\u1d3f",
+  "log_val_ratio:H_inc"         = "Log Value Ratio \u00d7 H\u1d3f",
+  "log_inc_ratio:H_val"         = "Log Income Ratio \u00d7 H\u1d3f\u1d5b\u1d43\u1d4d",
+  "log_val_ratio:H_val"         = "Log Value Ratio \u00d7 H\u1d3f\u1d5b\u1d43\u1d4d",
+  "log_inc_ratio:H_rent"        = "Log Income Ratio \u00d7 H\u1d3f\u1d63\u1d49\u207f\u1d57",
+  "log_val_ratio:H_rent"        = "Log Value Ratio \u00d7 H\u1d3f\u1d63\u1d49\u207f\u1d57",
+  "gini_inc_metro"              = "Income Gini",
+  "H_bw"                        = "Black-White Segregation H",
+  "unemp_rate_metro"            = "Unemployment Rate",
+  "vacancy_rate_metro"          = "Overall Vacancy Rate",
+  "pop_growth_metro"            = "Population Growth"
+)
+
+modelsummary(
+  list(
+    "(1) H\u1d3f\u1d47\u207f\u1d9c, Div FE"   = vc_v5_rfe,
+    "(1) H\u1d3f\u1d47\u207f\u1d9c, Metro FE" = vc_v5,
+    "(2) H\u1d3f\u1d5b\u1d43\u1d4d, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_val + log_val_ratio * H_val + .[vc_controls] | year + census_division,
+                                                        data = acs_vac, weights = ~units_tot, cluster = ~metro_area),
+    "(2) H\u1d3f\u1d5b\u1d43\u1d4d, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_val + log_val_ratio * H_val + .[vc_controls] | year + metro_area,
+                                                        data = acs_vac, weights = ~units_tot, cluster = ~metro_area),
+    "(3) H\u1d3f\u1d63\u1d49\u207f\u1d57, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_rent + log_val_ratio * H_rent + .[vc_controls] | year + census_division,
+                                                              data = acs_vac, weights = ~units_tot, cluster = ~metro_area),
+    "(3) H\u1d3f\u1d63\u1d49\u207f\u1d57, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_rent + log_val_ratio * H_rent + .[vc_controls] | year + metro_area,
+                                                              data = acs_vac, weights = ~units_tot, cluster = ~metro_area)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_rob_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared", "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+## TODO: Spatial Robustness Checks
+
+Within-metro spatial autocorrelation in tract vacancy rates is plausible — disinvestment and abandonment spread across adjacent tracts and omitted local amenities affect clusters of tracts simultaneously. CBSA FE removes between-metro spatial clustering, but within-metro residual dependence may remain. Three approaches to address this, in increasing order of complexity:
+
+1. **Conley standard errors** (`fixest::vcov_conley()`): correct SEs for spatial autocorrelation up to a distance cutoff without changing the estimator or model structure. Compatible with `feols`. Centroid coordinates are available in `acs_metro_geo.parquet`. Most practical first step.
+
+2. **Spatial lag as control**: pre-compute the queen-contiguity weighted average of neighbouring tracts' log income or vacancy rate (within-metro only, using `spdep::poly2nb()` on tract polygons from `acs_metro_geo.parquet`) and add it as a covariate. Keeps the existing `feols` framework intact.
+
+3. **Spatial error model**: add a spatial error correction (`spatialreg::errorsarlm()`) as a further robustness check to assess whether spatial dependence drives the interaction estimate.
+
+Note: weights matrix should be built within each metro separately to avoid creating spurious neighbours across CBSA boundaries.
+
+
+
+## Robustness: Logit Link Function
+
+The main specifications use OLS (LPM). As a robustness check, the full-controls models from both subsections are re-estimated with a logit link (`feglm`, `family = binomial(link = "logit")`). Because vacancy rates are concentrated in the 2–15 % range, far from both boundaries, the logit marginal effects and the LPM coefficients are near-identical in the observed range, and the interaction sign and significance are unchanged.
+
+```{r vac_conc_logit}
+vc3_rfe_logit  <- feglm(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + census_division,
+                         data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                         family = binomial(link = "logit"))
+vc3_fe_logit   <- feglm(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + metro_area,
+                         data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                         family = binomial(link = "logit"))
+
+vc_v5_rfe_logit <- feglm(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + census_division,
+                          data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                          family = binomial(link = "logit"))
+vc_v5_fe_logit  <- feglm(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + metro_area,
+                          data = acs_vac, weights = ~units_tot, cluster = ~metro_area,
+                          family = binomial(link = "logit"))
+
+modelsummary(
+  list(
+    "(1) Inc only, Div FE"   = vc3_rfe_logit,
+    "(2) Inc only, Metro FE" = vc3_fe_logit,
+    "(3) Joint, Div FE"      = vc_v5_rfe_logit,
+    "(4) Joint, Metro FE"    = vc_v5_fe_logit
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_val_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared",
+                  "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+
+## Robustness: High-Vacancy Markets Only
+
+The ABM mechanism requires housing market slack: in tight markets, vacancy is suppressed uniformly across neighbourhoods regardless of income or segregation, compressing the income–vacancy gradient mechanically. The full-sample estimate therefore understates the effect in markets where the mechanism can actually operate. This is an explicit scope condition of the ABM, not a limitation of the test.
+
+To verify that the interactions are concentrated where the theory predicts, the full-controls models from both subsections are re-estimated on the subsample of metros with an above-median overall vacancy rate in each wave (i.e. `vacancy_rate_metro` above the wave-specific cross-metro median). This retains metros with genuine housing market slack and excludes tight markets — particularly the large coastal metros facing supply shortages in the 2019 and 2024 waves — where the mechanism is suppressed. If the interactions are larger in magnitude and more precisely estimated in this subsample, that confirms the effect is driven by markets where household sorting can express itself as differential vacancy rather than being compressed by supply constraints.
+
+```{r vac_conc_slack}
+# Wave-specific median vacancy rate across metros
+vac_median_by_year <- acs_vac |>
+  distinct(metro_area, year, vacancy_rate_metro) |>
+  group_by(year) |>
+  mutate(vac_median = median(vacancy_rate_metro, na.rm = TRUE)) |>
+  ungroup() |>
+  select(metro_area, year, vac_median)
+
+acs_vac_slack <- acs_vac |>
+  left_join(vac_median_by_year, by = c("metro_area", "year")) |>
+  filter(vacancy_rate_metro > vac_median)
+
+modelsummary(
+  list(
+    "(1) Inc, Full, Div FE"    = vc3_rfe,
+    "(2) Inc, Slack, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + census_division,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area),
+    "(3) Inc, Full, Metro FE"  = vc3,
+    "(4) Inc, Slack, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_inc + .[vc_controls]                  | year + metro_area,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area),
+    "(5) Jnt, Full, Div FE"    = vc_v5_rfe,
+    "(6) Jnt, Slack, Div FE"   = feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + census_division,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area),
+    "(7) Jnt, Full, Metro FE"  = vc_v5,
+    "(8) Jnt, Slack, Metro FE" = feols(vac_rate ~ log_inc_ratio * H_inc + log_val_ratio * H_inc + .[vc_controls] | year + metro_area,
+                                        data = acs_vac_slack, weights = ~units_tot, cluster = ~metro_area)
+  ),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = vc_val_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "within.r.squared",
+                  "FE: year", "FE: census_division", "FE: metro_area"),
+  output      = "html"
+)
+```
+
+
+# Segregation Moderates Income → Housing Quality
+
+The ABM predicts that income segregation acts as a moderator of the relationship between household income and housing quality. In more segregated cities, neighbourhoods are more polarised in their attractiveness and housing quality. High-income households cluster in high-quality areas while low-income households are confined to low-quality ones, steepening the income–quality gradient. The cross-level interaction hypothesis is:
+
+> In more segregated cities, the effect of household income on housing quality is stronger (steeper slope).
+
+We test this with a WLS regression of within-group quality rank on log equivalised household income, the city-level rank-order income segregation index $H^R$, and their interaction. Household weights (HHWT) are applied throughout. Standard errors are clustered by CBSA. Two-way clustering on CBSA and year is not used: with only four survey waves the year dimension has far too few clusters for reliable cluster-robust inference.
+
+No fixed effects are included: `quality` is already z-standardised within `year × metro_area × tenure`, which removes all cell means — a finer demeaning than any combination of additive year and CBSA FEs. The identifying variation is therefore already purely within-cell (between households in the same metro, year, and tenure group). Instead, we control directly for the following time-varying individual and metro-level confounders:
+
+- metro area income inequality (Gini index): 
+- metro area racial segregation (Theil index White vs. Black):
+- metro area unemployment rate:
+- metro area vacancy rate: 
+- individual race/ethnicity:
+- individual education (college):
+- individual age and age squared: 
+
+
+```{r quality_combined}
+m1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) + # TODO log quality?
+              gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+            data = pums, weights = ~HHWT, cluster = "metro_area")
+m2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+            data = pums, weights = ~HHWT, cluster = "metro_area")
+m3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+              gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+            data = pums, weights = ~HHWT, cluster = "metro_area")
+
+modelsummary(
+  list("(1)" = m1, "(2)" = m2, "(3)" = m3),
+  stars   = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map = c("nobs", "r.squared"),
+  output  = "html"
+)
+```
+
+```{r quality_combined_plot}
+b    <- coef(m3)
+V    <- vcov(m3)
+
+age_mn   <- weighted.mean(pums$AGE,               pums$HHWT, na.rm = TRUE)
+gini_mn  <- weighted.mean(pums$gini_inc_metro,     pums$HHWT, na.rm = TRUE)
+Hbw_mn   <- weighted.mean(pums$H_bw,              pums$HHWT, na.rm = TRUE)
+unemp_mn <- weighted.mean(pums$unemp_rate_metro,   pums$HHWT, na.rm = TRUE)
+vac_mn   <- weighted.mean(pums$vacancy_rate_metro, pums$HHWT, na.rm = TRUE)
+h_mn     <- weighted.mean(pums$H_inc,             pums$HHWT, na.rm = TRUE)
+h_sd     <- sd(pums$H_inc, na.rm = TRUE)
+
+x_seq    <- seq(quantile(pums$log_equiv_inc, 0.05, na.rm = TRUE),
+                quantile(pums$log_equiv_inc, 0.95, na.rm = TRUE),
+                length.out = 100)
+h_levels <- h_mn + c(-h_sd, 0, h_sd)
+h_labels <- sprintf(c("Low ($-$1 SD, $H^R = %.3f$)",
+                       "Mean ($H^R = %.3f$)",
+                       "High ($+$1 SD, $H^R = %.3f$)"),
+                    h_levels)
+
+newdata <- expand.grid(
+  log_equiv_inc     = x_seq,
+  H_inc             = h_levels,
+  race_eth          = factor("nhwhite", levels = levels(pums$race_eth)),
+  college           = 0,
+  AGE               = age_mn,
+  gini_inc_metro     = gini_mn,
+  H_bw              = Hbw_mn,
+  unemp_rate_metro   = unemp_mn,
+  vacancy_rate_metro = vac_mn
+) |>
+  mutate(H_label = factor(H_inc, levels = h_levels, labels = h_labels))
+
+V_key <- V[c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc"),
+            c("log_equiv_inc", "H_inc", "log_equiv_inc:H_inc")]
+
+newdata <- newdata |>
+  mutate(
+    y_hat = predict(m3, newdata = newdata),
+    se    = mapply(function(x, h) {
+              z <- c(x, h, x * h)
+              sqrt(as.numeric(z %*% V_key %*% z))
+            }, log_equiv_inc, H_inc),
+    ylo   = y_hat - 1.96 * se,
+    yhi   = y_hat + 1.96 * se
+  )
+
+ggplot(newdata, aes(x = exp(log_equiv_inc),
+                    colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  scale_x_continuous(labels = scales::label_dollar()) +
+  labs(
+    x = "Equivalised Household Income (1999 USD)",
+    y = "Housing Quality (predicted z-score)"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "quality_income_seg.pdf"), height = 12, width = 18, units = "cm")
+```
+
+
+## By Tenure
+
+The income–quality relationship may operate through different mechanisms for renters and owners. For renters, income determines which segment of the rental market a household can access. For owners, income determines purchasing power in the sales market, where neighbourhood sorting is reinforced by credit constraints and property tax capitalisation of local amenities. We therefore estimate the interaction model separately by tenure.
+
+```{r quality_tenure}
+pums_renters <- filter(pums, renter == 1L)
+pums_owners  <- filter(pums, renter == 0L)
+
+m_r1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_renters, weights = ~HHWT, cluster = "metro_area")
+m_r2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_renters, weights = ~HHWT, cluster = "metro_area")
+m_r3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_renters, weights = ~HHWT, cluster = "metro_area")
+
+m_o1 <- feols(quality ~ log_equiv_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_owners,  weights = ~HHWT, cluster = "metro_area")
+m_o2 <- feols(quality ~ log_equiv_inc + H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_owners,  weights = ~HHWT, cluster = "metro_area")
+m_o3 <- feols(quality ~ log_equiv_inc * H_inc + race_eth + college + AGE + I(AGE^2) +
+                gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+              data = pums_owners,  weights = ~HHWT, cluster = "metro_area")
+
+dv_row_tenure <- data.frame(rbind(c(
+  "Dependent Variable",
+  "Quality (Renters)", "Quality (Renters)", "Quality (Renters)",
+  "Quality (Owners)",  "Quality (Owners)",  "Quality (Owners)"
+)))
+attr(dv_row_tenure, "position") <- 1
+
+modelsummary(
+  list("(1)" = m_r1, "(2)" = m_r2, "(3)" = m_r3,
+       "(4)" = m_o1, "(5)" = m_o2, "(6)" = m_o3),
+  add_rows = dv_row_tenure,
+  stars    = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map  = c("nobs", "r.squared"),
+  output   = "html"
+)
+```
+
+## Robustness: Value and Rent Segregation as Alternative Moderators
+
+We replicate the pooled interaction model (m3) replacing $H^R_\text{inc}$ with $H^R_\text{val}$ ($r = 0.77$) and $H^R_\text{rent}$ ($r = 0.47$) as the moderator.
+
+The caveats from the city-level section apply with particular force here. Housing quality is operationalised as a within-context rank of *rent* (renters) or *home value* (owners). Using $H^R_\text{rent}$ or $H^R_\text{val}$ as the moderator therefore creates a near-tautological relationship: metros with higher $H^R_\text{val}$ have by construction a steeper home-value gradient across neighbourhoods, which mechanically steepens the income–quality slope for owners; the same logic applies to $H^R_\text{rent}$ for renters. The result for these measures should be read as descriptive confirmation rather than an independent test of the moderation hypothesis. Income segregation is not derived from the quality outcome and remains the preferred moderator in the main specification.
+
+```{r quality_robseg}
+modelsummary(
+  list(
+    "(1)" = m3,
+    "(2)" = feols(quality ~ log_equiv_inc * H_val  + race_eth + college + AGE + I(AGE^2) +
+                    gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+                  data = pums, weights = ~HHWT, cluster = "metro_area"),
+    "(3)" = feols(quality ~ log_equiv_inc * H_rent + race_eth + college + AGE + I(AGE^2) +
+                    gini_inc_metro + H_bw + unemp_rate_metro + vacancy_rate_metro,
+                  data = pums, weights = ~HHWT, cluster = "metro_area")
+  ),
+  stars   = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map = c("nobs", "r.squared"),
+  output  = "html"
+)
+```
+
+
+# Segregation Moderates Income Inequality → Tenure Segregation
+
+The ABM does not model tenure explicitly, but the investment mechanism directly implies a tenure prediction. When income inequality rises, high-income households gain purchasing power relative to low-income ones. In a segregated metro, this income gain concentrates in already-wealthy neighbourhoods: landlords there invest more, housing quality rises further, and the neighbourhood becomes increasingly attractive to owner-occupiers who capitalise future quality gains into purchase prices. At the bottom, disinvestment deepens and the stock remains or shifts toward rental. The prediction is therefore:
+
+> In more segregated cities, a rise in income inequality translates into a larger rise in tenure segregation (spatial separation of owners and renters).
+
+The FD design mirrors the housing cost inequality model exactly: $\Delta$Tenure Segregation $H$ is regressed on $\Delta$Income Gini interacted with lagged income segregation $H^R_{m,t-5}$. Controls absorb concurrent shifts in racial segregation, labour market conditions, overall vacancy rates, renter share, and population growth. The renter share is included to net out any mechanical relationship between the aggregate tenure composition and its spatial unevenness.
+
+```{r tenure_seg_fd}
+tfd_coef_names <- c(
+  "d_gini_inc"             = "\u0394Income Gini",
+  "H_inc_lag_c"            = "Income Segregation H\u1d3f (t\u22125, centred)",
+  "d_gini_inc:H_inc_lag_c" = "\u0394Income Gini \u00d7 H\u1d3f (t\u22125)",
+  "d_H_bw"                 = "\u0394Black-White Segregation H",
+  "d_unemp"                = "\u0394Unemployment Rate",
+  "d_vacancy"              = "\u0394Vacancy Rate",
+  "d_pct_renter"           = "\u0394Renter Share",
+  "pop_growth_metro"       = "Population Growth"
+)
+
+tfd1  <- feols(d_H_tenure ~ d_gini_inc                                                                               | year,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd2  <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c                                                                 | year,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd3  <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c + d_H_bw + d_unemp + d_vacancy + d_pct_renter + pop_growth_metro | year,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd1r <- feols(d_H_tenure ~ d_gini_inc                                                                               | year + census_division,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd2r <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c                                                                 | year + census_division,
+               data = metro_vars_fd, cluster = ~metro_area)
+tfd3r <- feols(d_H_tenure ~ d_gini_inc * H_inc_lag_c + d_H_bw + d_unemp + d_vacancy + d_pct_renter + pop_growth_metro | year + census_division,
+               data = metro_vars_fd, cluster = ~metro_area)
+
+modelsummary(
+  list(tfd1, tfd1r, tfd2, tfd2r, tfd3, tfd3r),
+  estimate    = "{estimate}{stars}",
+  statistic   = "({std.error})",
+  coef_rename = tfd_coef_names,
+  stars       = c("+" = 0.1, "*" = .05, "**" = .01, "***" = .001),
+  gof_map     = c("nobs", "r.squared", "FE: year", "FE: census_division"),
+  output      = "html"
+)
+```
+
+### Predicted Values
+
+Predicted $\Delta$Tenure Segregation $H$ as a function of $\Delta$Income Gini at three levels of lagged income segregation. All other predictors held at zero. Year FE absorbed.
+
+```{r tenure_seg_fd_pred, fig.height=4}
+h_sd     <- sd(metro_vars_fd$H_inc_lag_c, na.rm = TRUE)
+x_seq    <- seq(min(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                max(metro_vars_fd$d_gini_inc, na.rm = TRUE),
+                length.out = 100)
+h_mn_lag <- mean(metro_vars_fd$H_inc_lag, na.rm = TRUE)
+h_levels <- c(-h_sd, 0, h_sd)
+h_labels <- sprintf(c("Low ($-$1 SD, $%.3f$)",
+                       "Mean ($%.3f$)",
+                       "High ($+$1 SD, $%.3f$)"),
+                    h_levels + h_mn_lag)
+
+b_tfd <- coef(tfd3r)
+V_tfd <- vcov(tfd3r)[c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c"),
+                      c("d_gini_inc", "H_inc_lag_c", "d_gini_inc:H_inc_lag_c")]
+
+expand.grid(d_gini_inc = x_seq, H_inc_lag_c = h_levels) |>
+  mutate(
+    H_label = factor(H_inc_lag_c, levels = h_levels, labels = h_labels),
+    y_hat   = b_tfd["d_gini_inc"]             * d_gini_inc
+            + b_tfd["H_inc_lag_c"]            * H_inc_lag_c
+            + b_tfd["d_gini_inc:H_inc_lag_c"] * d_gini_inc * H_inc_lag_c,
+    se      = mapply(function(x, h) {
+                z <- c(x, h, x * h)
+                sqrt(as.numeric(z %*% V_tfd %*% z))
+              }, d_gini_inc, H_inc_lag_c),
+    ylo     = y_hat - 1.96 * se,
+    yhi     = y_hat + 1.96 * se
+  ) |>
+  ggplot(aes(x = d_gini_inc, colour = H_label, fill = H_label, linetype = H_label)) +
+  geom_ribbon(aes(ymin = ylo, ymax = yhi), alpha = 0.15, colour = NA) +
+  geom_line(aes(y = y_hat), linewidth = 0.8) +
+  scale_colour_manual(values = cb_palette[c(1, 3, 2)],
+                      name   = TeX("Income Segregation $H^R$"),
+                      labels = lapply(h_labels, TeX)) +
+  scale_fill_manual(values   = cb_palette[c(1, 3, 2)],
+                    name     = TeX("Income Segregation $H^R$"),
+                    labels   = lapply(h_labels, TeX)) +
+  scale_linetype_manual(values = lines[1:3],
+                        name   = TeX("Income Segregation $H^R$"),
+                        labels = lapply(h_labels, TeX)) +
+  labs(
+    x = TeX("$\\Delta$ Income Gini"),
+    y = TeX("$\\Delta$ Tenure Segregation $H$")
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+ggsave(paste0(results_dir, "tenure_seg_fd.pdf"), height = 12, width = 18, units = "cm")
+```
+
+# References
+
+Chau, Kwong Wing, and Tung-Leong Chin. 2003. “A Critical Review of Literature on the Hedonic Price Model.” International Journal for Housing Science and Its Applications 27(2):145–65.
+
+Krysan, Maria and Kyle Crowder. 2017. Cycle of Segregation: Social Processes and Residential Stratification. New York: Russell Sage Foundation. isbn: 978-1-61044-869-7.
+
+Reardon, Sean F. and Kendra Bischoff. 2011. “Income Inequality and Income Segregation.” American Journal of Sociology 116(4): 1092–1153. doi: 10.1086/657114.
+
+Rosen, Sherwin. 1974. “Hedonic Prices and Implicit Markets: Product Differentiation in Pure Competition.” Journal of Political Economy 82(1):34–55. doi:10.1086/260169.
+
+Rothwell, Jonathan T. and Douglas S. Massey. 2010. “Density Zoning and Class Segregation in U.S. Metropolitan Areas.” Social Science Quarterly 91(5): 1123–1143. doi: 10.1111/j.1540-6237.2010.00724.x.
+
+Sirmans, Stacy, David Macpherson, and Emily Zietz. 2005. “The Composition of Hedonic Pricing Models.” Journal of Real Estate Literature 13(1):1–44. doi:10.1080/10835547.2005.12090154.
