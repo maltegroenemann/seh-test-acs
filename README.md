@@ -1,46 +1,48 @@
 # SEHTestACS
 
-Empirical test of a socio-economic agent-based model (ABM) of residential segregation, neighbourhood change, and housing inequality, using US American Community Survey (ACS) data. The analysis covers the top 100 Core-Based Statistical Areas (CBSAs) by 2024 population in the contiguous United States, across four non-overlapping ACS 5-year waves (2005–2009, 2010–2014, 2015–2019, 2020–2024).
+Empirical test of a socio-economic agent-based model (ABM) of residential segregation, neighbourhood change, and housing inequality, using US American Community Survey (ACS) data. The analysis covers all Core-Based Statistical Areas (CBSAs) with a 2024 population of at least 100,000 in the contiguous United States (~380 metros), across four non-overlapping ACS 5-year waves (2005–2009, 2010–2014, 2015–2019, 2020–2024).
 
 ## Research Questions
 
 The project tests city- and individual-level hypotheses derived from the ABM:
 
-- Are rents and housing values more unequally distributed across space within cities than household income?
-- Does income segregation amplify the relationship between income inequality and housing cost inequality across metros?
-- Does income segregation steepen the income–housing quality gradient for individual households?
-- Does income segregation moderate the relationship between household income and housing cost burden?
+- **H1** — Is housing (rent, value, tenure) more segregated than income within cities?
+- **H2** — Does income segregation amplify the relationship between income inequality and housing cost inequality?
+- **H3** — Does income segregation steepen the income–vacancy gradient across neighbourhoods?
+- **H4** — Does income segregation steepen the income–housing quality gradient for individual households?
+- **H5** — Does income segregation amplify the relationship between income inequality and tenure segregation?
 
 ## Pipeline
 
-Scripts must be run in order. Phases 1 and 2 are compute-intensive and are submitted as SLURM batch jobs on the HELIX HPC cluster via `SEHTestACS_dataprep.sh` and `SEHTestACS_analysis.sh`.
+Scripts must be run in order. Phases 1–3 are compute-intensive and are submitted as SLURM batch jobs on the HELIX HPC cluster via `SEHTestACS_dataprep.sh`. Phase 4 analyses are rendered via `SEHTestACS_analysis.sh`.
 
 ```
 Phase 1 – Download
-  SEHTestACS1a_downloadACS.R    ACS tract-level tables via IPUMS NHGIS API
-  SEHTestACS1b_downloadPUMS.R   ACS PUMS microdata via IPUMS USA API
+  SEHTestACS1a_downloadACS.R      ACS tract-level tables via IPUMS NHGIS API
+  SEHTestACS1b_downloadPUMS.R     ACS PUMS microdata via IPUMS USA API
 
 Phase 2 – Data preparation
-  SEHTestACS2a_dataprepACS.R    Clean and aggregate tract-level ACS data
-                                → data/acs_top100.parquet
-  SEHTestACS2b_dataprepPUMS.R   Clean PUMS; link PUMAs to CBSAs; derive
-                                household-level variables
-                                → data/pums_hh.parquet
-  SEHTestACS2c_dataprepGEO.R    Attach tract geometries (optional, for
-                                spatial analysis)
-                                → data/acs_top100_geo.parquet
+  SEHTestACS2a_dataprepACS.R      Clean and aggregate tract-level ACS data
+                                  → data/acs_metro.parquet
+  SEHTestACS2b_dataprepPUMS.R     Clean PUMS; link PUMAs to CBSAs; derive
+                                  household-level variables
+                                  → data/pums_hh.parquet
 
 Phase 3 – City-level aggregation
-  SEHTestACS3_citylevel.R       Compute CBSA × year segregation indices,
-                                inequality measures, and controls; join to
-                                PUMS
-                                → data/cbsa_vars.parquet
-                                → data/pums_analysis.parquet
+  SEHTestACS3_citylevel.R         Compute CBSA × year segregation indices,
+                                  inequality measures, and controls; join to
+                                  PUMS
+                                  → data/metro_vars.parquet
+                                  → data/pums_analysis.parquet
+  SEHTestACS4_geometries.R        Download tract geometries for mapping
 
 Phase 4 – Analysis
-  SEHTestACS4_analyses.Rmd      Individual- and city-level regression
-                                analyses (fixest); rendered to HTML
-                                → results/SEHTestACS4_analyses.html
+  SEHTestACS5_description.Rmd     Descriptive statistics and distributions
+  SEHTestACS6a_housingseg.Rmd     H1: housing segregation vs. income segregation
+  SEHTestACS6b_housinginequality.Rmd  H2: segregation × income inequality → housing cost inequality
+  SEHTestACS6c_vacancy.Rmd        H3: segregation × income → vacancy
+  SEHTestACS6d_quality.Rmd        H4: segregation × income → housing quality
+  SEHTestACS6e_tenure.Rmd         H5: segregation × income inequality → tenure segregation
 ```
 
 ## Data
@@ -58,15 +60,14 @@ MABLE/Geocorr crosswalk files (PUMA → County, three vintages) must be download
 
 | File | Unit | Contents |
 |------|------|----------|
-| `data/acs_top100.parquet` | Tract × year | Tract-level ACS aggregates for top-100 CBSAs |
-| `data/acs_top100_geo.parquet` | Tract × year | Same, with tract polygon geometries (GeoParquet) |
+| `data/acs_metro.parquet` | Tract × year | Tract-level ACS aggregates for all CBSAs ≥ 100k |
 | `data/pums_hh.parquet` | Household × year | Cleaned PUMS microdata with derived variables |
-| `data/cbsa_vars.parquet` | CBSA × year | Segregation indices, inequality measures, controls |
+| `data/metro_vars.parquet` | CBSA × year | Segregation indices, inequality measures, controls |
 | `data/pums_analysis.parquet` | Household × year | PUMS joined with CBSA-level variables |
 
 ## Key methodological choices
 
-**Sample.** Top 100 CBSAs by 2024 population; contiguous US only; 2020-vintage CBSA definitions throughout.
+**Sample.** All CBSAs with 2024 population ≥ 100,000 (~380 metros); contiguous US only; 2020-vintage CBSA definitions throughout.
 
 **Segregation indices.** Rank-order income segregation H^R (Reardon & Bischoff 2011) is the primary measure. It is computed from income bracket counts by fitting a 4th-degree polynomial to bracket-level Theil H values and integrating. This approach is robust to bracket boundary shifts across waves. Binary Theil H (Reardon & Firebaugh 2002) is used for two-category splits (owner/renter, NH-White/NH-Black, occupied/vacant).
 
